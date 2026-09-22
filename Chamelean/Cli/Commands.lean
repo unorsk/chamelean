@@ -77,12 +77,20 @@ private def blepairGetCmd : CliTree :=
     deviceRequired fun c _ => do
       IO.println (if ← c.getBlePairingEnable then "enabled" else "disabled")
 
+private def modelCmd : CliTree :=
+  mkLeaf "model" "Get device model (Ultra/Lite)" { description := "Get device model (Ultra/Lite)" } <|
+    deviceRequired fun c _ => do
+      IO.println (if (← c.getDeviceModel).data[0]?.getD 0 == 0 then "Ultra" else "Lite")
+
+private def gitversionCmd : CliTree :=
+  mkLeaf "gitversion" "Get firmware git version" { description := "Get firmware git version" } <|
+    deviceRequired fun c _ => do IO.println (String.fromUTF8! (← c.getGitVersion).data)
+
 /-! ## `hw` extras (spliced into the `hw` group after connect/disconnect/version) -/
 
 def hwExtras : List CliTree := [
   chipIdCmd, addressCmd, modeCmd, batteryCmd, dfuCmd,
-  todoLeaf "model" "Get device model (Ultra/Lite)",
-  todoLeaf "gitversion" "Get firmware git version",
+  modelCmd, gitversionCmd,
   todoLeaf "factory_reset" "Wipe all data and settings (factory reset)",
   grp "settings" "Device settings" [
     todoLeaf "dump" "Dump all settings",
@@ -114,6 +122,67 @@ def hwExtras : List CliTree := [
 
 /-! ## `hf` group -/
 
+/-! ### `hf mf` reader commands -/
+
+/-- Args shared by `hf mf` commands that unlock a block with a known key: `--blk`, `-a`/`-b`,
+`-k`. Port of `MF1AuthArgsUnit`'s parser. -/
+private def mf1AuthParser (description : String) : ArgParser := {
+  description
+  specs := [
+    { key := "blk", names := ["--blk", "--block"], kind := .int, required := true,
+      metavar := "dec", help := "Block the known key belongs to" },
+    { key := "a", names := ["-a", "-A"], kind := .flag, help := "Known key is A (default)" },
+    { key := "b", names := ["-b", "-B"], kind := .flag, help := "Known key is B" },
+    { key := "key", names := ["-k", "--key"], kind := .hex, required := true,
+      metavar := "hex", help := "Sector key, 12 hex digits" } ]
+  groups := [ { members := ["a", "b"] } ] }
+
+/-- Require reader mode, then hand the runner the parsed block, key type and 6-byte key.
+Port of `MF1AuthArgsUnit.get_param`. -/
+private def mf1AuthArgs (run : Client → (block keyType : UInt8) → (key : ByteArray) → IO Unit)
+    : ReplState → Args → IO Unit :=
+  readerRequired fun c a => do
+    -- `required` already guaranteed presence at parse time; the fallbacks keep us total.
+    let blk := (a.int? "blk").getD 0
+    if blk < 0 ∨ 255 < blk then throw (CliError.usage "block must be in 0..255").toIO
+    let key := (a.hex? "key").getD .empty
+    unless key.size == 6 do throw (CliError.usage "key must include 12 HEX symbols").toIO
+    let keyType := if a.has "b" then MfcKeyType.b else MfcKeyType.a
+    run c blk.toNat.toUInt8 keyType.toUInt8 key
+
+private def mfInfoCmd : CliTree :=
+  mkLeaf "info" "Detect MIFARE Classic support" { description := "Detect MIFARE Classic support" } <|
+    readerRequired fun c _ => do
+      IO.println (if ← c.mf1DetectSupport then "MIFARE Classic supported"
+                  else "Not a MIFARE Classic tag")
+
+private def mfNtCmd : CliTree :=
+  mkLeaf "nt" "Detect PRNG type" { description := "Detect MIFARE Classic PRNG type" } <|
+    readerRequired fun c _ => do
+      match expectResponse (← c.mf1DetectPrng) [Status.hfTagOk.toUInt16] "nt" with
+      | .error e => throw e.toIO
+      | .ok d =>
+        let prng := (MifareClassicPrngType.ofUInt8? (d[0]?.getD 0)).map (·.description)
+        IO.println s!"Prng: {prng.getD "Unknown"}"
+
+private def mfAuthCmd : CliTree :=
+  mkLeaf "auth" "Verify a key against a block" (mf1AuthParser "Verify a MIFARE Classic key on a block") <|
+    mf1AuthArgs fun c blk keyType key => do
+      let r ← c.mf1AuthOneKeyBlock blk keyType key
+      IO.println (if r.status == Status.hfTagOk.toUInt16 then green " - Key valid" else red " - Key invalid")
+
+private def mfRdblCmd : CliTree :=
+  mkLeaf "rdbl" "Read one block" (mf1AuthParser "MIFARE Classic read one block") <|
+    mf1AuthArgs fun c blk keyType key => do
+      match expectResponse (← c.mf1ReadOneBlock blk keyType key) [Status.hfTagOk.toUInt16] "rdbl" with
+      | .error e => throw e.toIO
+      | .ok d => IO.println s!" - Data: {toHex d}"
+
+private def mfuPagesCmd : CliTree :=
+  mkLeaf "pages" "Get emulator page count" { description := "Get emulator page count" } <|
+    deviceRequired fun c _ => do
+      IO.println s!"Emulator pages: {(← c.mfuGetEmuPagesCount).data[0]?.getD 0}"
+
 private def hfMfEconfig : CliTree :=
   grp "econfig" "MIFARE Classic emulator config" [
     todoLeaf "view" "Show emulator config",
@@ -140,16 +209,16 @@ def hfGroup : CliTree :=
       grp "anticoll" "Emulated anti-collision data" [
         todoLeaf "get" "Get anti-collision data", todoLeaf "set" "Set anti-collision data" ] ],
     grp "mf" "MIFARE Classic" [
-      todoLeaf "info" "Detect MIFARE Classic support",
-      todoLeaf "nt" "Detect PRNG type",
+      mfInfoCmd,
+      mfNtCmd,
       todoLeaf "ntdist" "Detect nonce distance",
       todoLeaf "nested" "Nested attack: collect nonces",
       todoLeaf "staticnested" "Static-nested: collect nonces",
       todoLeaf "hardnested" "Hardnested: collect nonces",
       todoLeaf "encnested" "Static-encrypted-nested: collect nonces",
       todoLeaf "darkside" "Darkside: collect parameters",
-      todoLeaf "auth" "Verify a key against a block",
-      todoLeaf "rdbl" "Read one block",
+      mfAuthCmd,
+      mfRdblCmd,
       todoLeaf "wrbl" "Write one block",
       todoLeaf "value" "Increment/decrement/restore a value block",
       todoLeaf "check" "Check keys against masked sectors",
@@ -159,7 +228,7 @@ def hfGroup : CliTree :=
       todoLeaf "eload" "Write emulator block data",
       hfMfEconfig ],
     grp "mfu" "MIFARE Ultralight / NTAG" [
-      todoLeaf "pages" "Get emulator page count",
+      mfuPagesCmd,
       todoLeaf "rdpg" "Read emulator pages",
       todoLeaf "wrpg" "Write emulator pages",
       todoLeaf "resetauth" "Reset authentication counter",
@@ -186,18 +255,32 @@ def hfGroup : CliTree :=
 
 /-! ## `lf` group -/
 
-/-- The read/write/emulate quartet most LF protocols share. -/
-private def lfProto (name help : String) (extra : List CliTree := []) : CliTree :=
+/-- The read/write/emulate quartet most LF protocols share. `read` defaults to a stub; wired
+protocols pass their own scan leaf. -/
+private def lfProto (name help : String) (extra : List CliTree := [])
+    (read : CliTree := todoLeaf "read" "Read a card") : CliTree :=
   grp name help ([
-    todoLeaf "read" "Read a card",
+    read,
     todoLeaf "write" "Write a card onto T55xx",
     grp "emu" "Emulated id" [ todoLeaf "get" "Get emulated id", todoLeaf "set" "Set emulated id" ]
   ] ++ extra)
 
+private def em410xReadCmd : CliTree :=
+  mkLeaf "read" "Scan an EM410x/Electra tag and print its id"
+      { description := "Scan em410x tag and print id" } <|
+    readerRequired fun c _ => do
+      match expectResponse (← c.em410xScan) [Status.lfTagOk.toUInt16] "em410x read" with
+      | .error e => throw e.toIO
+      | .ok d =>
+        let tagType := readU16 d 0
+        let name := (TagSpecificType.ofUInt16? tagType).map (·.description) |>.getD s!"tag {tagType}"
+        let idLen := if tagType == TagSpecificType.em410xElectra.toUInt16 then 13 else 5
+        IO.println s!"{name}: {green (toHex (d.extract 2 (2 + idLen)))}"
+
 def lfGroup : CliTree :=
   grp "lf" "Low-frequency (125 kHz) commands" [
     grp "em" "EM microelectronic" [
-      lfProto "410x" "EM410x / Electra",
+      lfProto "410x" "EM410x / Electra" (read := em410xReadCmd),
       grp "4x05" "EM4x05 / EM4x69" [ todoLeaf "read" "Read a tag" ] ],
     lfProto "hid" "HID Prox",
     lfProto "ioprox" "ioProx (XSF)" [
