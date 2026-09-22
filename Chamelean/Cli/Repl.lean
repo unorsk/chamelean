@@ -105,7 +105,12 @@ partial def root (_ : Unit) : CliTree :=
   .group "" "" [
     clearCmd, remCmd, exitCmd, dumpHelpCmd root,
     .group "hw" "Hardware-related commands"
+      -- TODO(phase 5): slot, settings, mode, chipid, address, dfu, factory_reset, battery, raw
+      -- Groups now exist (see `Cli/Commands.hwExtras`); most leaves are stubs pending device
+      -- wiring, and a generic `hw raw` command is still to come.
       ([connectCmd, disconnectCmd, versionCmd] ++ hwExtras),
+    -- TODO(phase 5): hf, lf, data, emv groups
+    -- hf/lf/emv are wired below as stub trees (`Cli/Commands`); a `data` group is still to come.
     hfGroup,
     lfGroup
   ]

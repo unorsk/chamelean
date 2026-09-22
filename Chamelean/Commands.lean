@@ -56,6 +56,13 @@ def getDeviceModel (c : Client) : IO Response := c.sendCmd .getDeviceModel
 /-- All persisted settings in one blob (see `get_device_settings` for the layout). -/
 def getDeviceSettings (c : Client) : IO Response := c.sendCmd .getDeviceSettings
 
+/-- Change device mode by raw mode byte; `setReaderMode` is the boolean wrapper. -/
+def changeDeviceMode (c : Client) (mode : UInt8) : IO Response :=
+  c.sendCmd .changeDeviceMode (b1 mode)
+
+/-- Whether the device is in reader mode. Alias of `getDeviceMode`, matching the Python client. -/
+def isDeviceReaderMode (c : Client) : IO Bool := c.getDeviceMode
+
 /-- Reboot into DFU (bootloader) mode. Fire-and-forget: the device drops the link on reset. -/
 def enterBootloader (c : Client) : IO Unit := c.post Command.enterBootloader.toUInt16
 
@@ -314,6 +321,13 @@ def getSlotInfo (c : Client) : IO Response := c.sendCmd .getSlotInfo
 
 /-- The currently active slot (0-based on the wire). -/
 def getActiveSlot (c : Client) : IO Response := c.sendCmd .getActiveSlot
+
+/-- The active slot's LF tag type, from `getSlotInfo` + `getActiveSlot`; `none` if unknown.
+Port of the private `_get_active_lf_tag_type`. -/
+def getActiveLfTagType (c : Client) : IO (Option TagSpecificType) := do
+  let info := (← c.getSlotInfo).data
+  let activeFw := (← c.getActiveSlot).data[0]?.getD 0  -- 0-based slot index
+  return TagSpecificType.ofUInt16? (readU16 info (activeFw.toNat * 4 + 2))
 
 /-- Select the active slot. -/
 def setActiveSlot (c : Client) (slot : SlotNumber) : IO Response :=
