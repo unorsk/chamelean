@@ -28,6 +28,14 @@ def readU16 (bytes : ByteArray) (i : Nat) : UInt16 :=
 def pushU16 (bytes : ByteArray) (v : UInt16) : ByteArray :=
   bytes.push (v >>> 8).toUInt8 |>.push v.toUInt8
 
+def readU32 (bytes : ByteArray) (i : Nat) : UInt32 :=
+  (bytes[i]!.toUInt32 <<< 24) ||| (bytes[i + 1]!.toUInt32 <<< 16) |||
+  (bytes[i + 2]!.toUInt32 <<< 8) ||| bytes[i + 3]!.toUInt32
+
+def pushU32 (bytes : ByteArray) (v : UInt32) : ByteArray :=
+  bytes.push (v >>> 24).toUInt8 |>.push (v >>> 16).toUInt8
+    |>.push (v >>> 8).toUInt8 |>.push v.toUInt8
+
 structure Frame where
   cmd : UInt16
   status : UInt16 := 0

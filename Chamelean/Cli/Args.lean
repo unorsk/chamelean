@@ -74,6 +74,9 @@ structure ArgParser where
   description : String := ""
   specs : List ArgSpec := []
   groups : List ArgGroup := []
+  /-- Accept (and ignore) tokens that match no spec, instead of erroring. Used by not-yet-wired
+  stub commands so the arguments they will eventually take don't trip the parser today. -/
+  allowUnknown : Bool := false
 deriving Inhabited
 
 /-- Parsed arguments: validated at parse time, read back through the typed accessors. -/
@@ -165,7 +168,8 @@ def parse (p : ArgParser) (argv : List String) : Except CliError Args := do
       else if tok.startsWith "-" && tok != "-" &&
               !((tok.toList.drop 1).head?.map (·.isDigit) |>.getD false) then
         -- A dash-led token that is not a negative number and matches no spec.
-        throw <| .usage s!"unknown option: {tok}"
+        if p.allowUnknown then rest := rest ++ [tok]
+        else throw <| .usage s!"unknown option: {tok}"
       else
         rest := rest ++ [tok]
   -- Bind the trailing positional capture.
@@ -178,7 +182,8 @@ def parse (p : ArgParser) (argv : List String) : Except CliError Args := do
     else if s.required then
       throw <| .usage s!"argument {s.key}: required"
   | none =>
-    if !rest.isEmpty then throw <| .usage s!"unexpected argument(s): {String.intercalate " " rest}"
+    if !rest.isEmpty && !p.allowUnknown then
+      throw <| .usage s!"unexpected argument(s): {String.intercalate " " rest}"
   -- Required value options.
   for s in p.specs do
     if s.required && !s.names.isEmpty && !args.has s.key then

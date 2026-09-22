@@ -1,5 +1,6 @@
 import Chamelean.Cli.Tree
 import Chamelean.Cli.Pretty
+import Chamelean.Cli.Commands
 
 /-!
 The interactive REPL: the command registry, argument dispatch, and the read-eval loop.
@@ -103,11 +104,10 @@ private def versionCmd : CliTree :=
 partial def root (_ : Unit) : CliTree :=
   .group "" "" [
     clearCmd, remCmd, exitCmd, dumpHelpCmd root,
-    .group "hw" "Hardware-related commands" [
-      connectCmd, disconnectCmd, versionCmd
-      -- TODO(phase 5): slot, settings, mode, chipid, address, dfu, factory_reset, battery, raw
-    ]
-    -- TODO(phase 5): hf, lf, data, emv groups
+    .group "hw" "Hardware-related commands"
+      ([connectCmd, disconnectCmd, versionCmd] ++ hwExtras),
+    hfGroup,
+    lfGroup
   ]
 
 /-! ## Dispatch and loop -/

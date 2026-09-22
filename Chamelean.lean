@@ -4,6 +4,7 @@ import Chamelean.Command
 import Chamelean.Device
 import Chamelean.Transport
 import Chamelean.Client
+import Chamelean.Commands
 import Chamelean.Crypto1
 import Chamelean.Tools
 import Chamelean.Cli
