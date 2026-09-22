@@ -21,6 +21,17 @@ deriving Inhabited
 
 def Response.ok (r : Response) : Bool := r.status == Status.success.toUInt16
 
+/-- One ISO14443-A tag as returned by `hf14aScan`. -/
+structure Tag14a where
+  uid : ByteArray
+  /-- Answer To reQuest, type A: two bytes. -/
+  atqa : ByteArray
+  /-- Select AcKnowledge byte. -/
+  sak : UInt8
+  /-- Answer To Select; empty for tags that don't reach ISO14443-4. -/
+  ats : ByteArray
+deriving Inhabited
+
 /-- Commands with a caller waiting for their reply, keyed by command code. -/
 abbrev Pending := Std.HashMap UInt16 (IO.Promise Response)
 
@@ -150,6 +161,48 @@ def loadCapabilities (c : Client) : IO (Array UInt16) := do
   let codes := (Array.range (r.data.size / 2)).map fun i => readU16 r.data (2 * i)
   c.supported.set codes
   return codes
+
+/--
+Scan for ISO14443-A (13.56 MHz) tags in the field. The device must be in reader mode
+(`changeDeviceMode`); an empty result means the field is clear, an error status is raised.
+-/
+def hf14aScan (c : Client) : IO (Array Tag14a) := do
+  let r ← c.sendCmd .hf14aScan
+  -- This command reports success as HF_TAG_OK (0x00), not the device-wide SUCCESS (0x68).
+  if r.status == Status.hfTagNo.toUInt16 then return #[]
+  unless r.status == Status.hfTagOk.toUInt16 do
+    throw <| IO.userError s!"hf14aScan failed: {Status.describe r.status} \
+      (is the device in reader mode? changeDeviceMode 01)"
+  let d := r.data
+  let count := (d[0]?.getD 0).toNat
+  let mut tags : Array Tag14a := #[]
+  let mut o := 1  -- byte 0 is the tag count
+  for _ in [0:count] do
+    let uidLen := (d[o]?.getD 0).toNat; o := o + 1
+    let uid := d.extract o (o + uidLen); o := o + uidLen
+    let atqa := d.extract o (o + 2); o := o + 2
+    let sak := d[o]?.getD 0; o := o + 1
+    let atsLen := (d[o]?.getD 0).toNat; o := o + 1
+    let ats := d.extract o (o + atsLen); o := o + atsLen
+    tags := tags.push { uid, atqa, sak, ats }
+  return tags
+
+/-- The device's 6-digit BLE pairing passcode (stored on the device as ASCII digits). -/
+def getBlePairingKey (c : Client) : IO String := do
+  let r ← c.sendCmd .getBlePairingKey
+  unless r.ok do throw <| IO.userError s!"getBlePairingKey failed: {Status.describe r.status}"
+  return String.fromUTF8! r.data
+
+/-- Whether BLE pairing (passcode required to bond) is currently enabled. -/
+def getBlePairingEnable (c : Client) : IO Bool := do
+  let r ← c.sendCmd .getBlePairingEnable
+  unless r.ok do throw <| IO.userError s!"getBlePairingEnable failed: {Status.describe r.status}"
+  return r.data[0]?.getD 0 != 0
+
+/-- Turn BLE pairing on or off. -/
+def setBlePairingEnable (c : Client) (enabled : Bool) : IO Unit := do
+  let r ← c.sendCmd .setBlePairingEnable (ByteArray.mk #[if enabled then 1 else 0])
+  unless r.ok do throw <| IO.userError s!"setBlePairingEnable failed: {Status.describe r.status}"
 
 end Client
 end Chamelean

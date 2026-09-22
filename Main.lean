@@ -5,6 +5,10 @@ Test harness: connects to a Chameleon Ultra and prints device info, or sends one
 
     chamelean                       auto-detect the USB port and print device info
     chamelean /dev/cu.usbmodem1101  same, explicit port (Linux: /dev/ttyACM0, or tcp:host:port)
+    chamelean PORT scan             scan for 14a (13.56 MHz) tags (needs reader mode)
+    chamelean PORT ble-key          print the stored BLE pairing passcode
+    chamelean PORT ble-pairing      show whether BLE pairing is enabled
+    chamelean PORT ble-pairing on   enable BLE pairing (off to disable)
     chamelean PORT CMD [HEX]        send raw command CMD (decimal) with optional hex payload
 -/
 open Chamelean
@@ -57,12 +61,30 @@ def deviceInfo (c : Client) : IO Unit := do
   let caps ← c.loadCapabilities
   IO.println s!"capabilities  : {caps.size} commands"
 
+def scan (c : Client) : IO Unit := do
+  let tags ← c.hf14aScan
+  if tags.isEmpty then
+    IO.println "no 14a tag in field"
+  for t in tags do
+    IO.println s!"uid {hex t.uid}  atqa {hex t.atqa}  sak {hex (.mk #[t.sak])}\
+      {if t.ats.isEmpty then "" else s!"  ats {hex t.ats}"}"
+
+def blePairing (c : Client) (arg : List String) : IO Unit := do
+  match arg with
+  | [] => IO.println s!"ble pairing: {if ← c.getBlePairingEnable then "enabled" else "disabled"}"
+  | "on" :: _ => c.setBlePairingEnable true;  IO.println "ble pairing enabled"
+  | "off" :: _ => c.setBlePairingEnable false; IO.println "ble pairing disabled"
+  | x :: _ => throw <| IO.userError s!"ble-pairing takes on|off or nothing, got: {x}"
+
 def run (port : String) (rest : List String) : IO Unit := do
   IO.println s!"opening {port}"
   let c ← Client.connect port
   try
     match rest with
     | [] => deviceInfo c
+    | "scan" :: _ => scan c
+    | "ble-key" :: _ => IO.println s!"ble pairing key: {← c.getBlePairingKey}"
+    | "ble-pairing" :: arg => blePairing c arg
     | cmdStr :: payload =>
       let some cmd := cmdStr.toNat? | throw <| IO.userError s!"bad command number: {cmdStr}"
       let data ← match payload with
