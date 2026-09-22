@@ -6,3 +6,4 @@ import Chamelean.Transport
 import Chamelean.Client
 import Chamelean.Crypto1
 import Chamelean.Tools
+import Chamelean.Cli

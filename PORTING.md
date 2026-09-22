@@ -12,14 +12,21 @@ harness in `Main.lean`.
 | `chameleon_enum.py` | `Chamelean/Command.lean`, `Chamelean/Device.lean` | ✅ |
 | `chameleon_com.py` | `Chamelean/Frame.lean`, `Chamelean/Transport.lean`, `Chamelean/Client.lean` | ✅ |
 | `chameleon_cmd.py` | `Chamelean/Client.lean` (only a handful of wrappers exist) | ◐ partial |
-| `chameleon_utils.py` | new `Chamelean/Cli/Tree.lean`, `Chamelean/Cli/Args.lean`, `Chamelean/Cli/Pretty.lean` | ☐ |
+| `chameleon_utils.py` | `Chamelean/Cli/Tree.lean`, `Chamelean/Cli/Args.lean`, `Chamelean/Cli/Pretty.lean` | ◐ scaffold |
 | `chameleon_cli_unit.py` | new `Chamelean/Cli/Commands/*.lean` | ☐ |
-| `chameleon_cli_main.py` | new REPL in `Main.lean` / `Chamelean/Cli/Repl.lean` | ☐ |
+| `chameleon_cli_main.py` | REPL in `Chamelean/Cli/Repl.lean`, launched from `Main.lean` | ◐ scaffold |
 | `crypto1.py` | `Chamelean/Crypto1.lean` | ✅ |
 | `hardnested_utils.py` | folded into `Chamelean/Crypto1.lean` | ◐ partial |
 
-Note: `Main.lean` is currently a throwaway test harness. The real CLI is a REPL,
-so `Main.lean` will get rewritten (see phase 6).
+Note: `Main.lean` is now a thin REPL launcher (`Cli.repl`); the old test harness is gone.
+The CLI scaffold (command tree, arg parser, errors, colors, dispatch loop) is in place under
+`Chamelean/Cli/`, wired with a proof-of-life command set (`clear`, `rem`, `exit`, `dump_help`,
+`hw connect`/`disconnect`/`version`). Porting from here = adding `CliTree.leaf`s and their
+`Client` wrappers; the plumbing below is built.
+
+Gotcha (Lean v4.34 std): `String.split` returns an `Std.Iter`, `String.drop`/`trim*` return
+`String.Slice`, and `String.get?`/`String.mk` are deprecated. Use `Cli.words` to tokenize and
+`.toString` to demote a slice.
 
 ---
 
@@ -49,21 +56,21 @@ Flag these now so we don't discover them mid-port.
 
 Foundation everything else needs. Build this first.
 
-- [ ] `CLITree` — the command tree (`root`, `subgroup`, `command`). In Lean model
+- [x] `CLITree` — the command tree (`root`, `subgroup`, `command`). In Lean model
       as an inductive/structure tree of groups and leaf commands, not Python's
       decorator registry. Each leaf carries: name, help, arg-parser, runner.
-- [ ] Argument parsing — replaces `ArgumentParserNoExit`/argparse. Write a small
+- [x] Argument parsing — replaces `ArgumentParserNoExit`/argparse. Write a small
       idiomatic parser (flags, options with values, `-a/-b` mutually exclusive
       groups, required args, `int`/`hex`/`str` types). Return `Except String Args`.
       Don't reimplement argparse; build the minimum these commands use.
-- [ ] `ArgsParserError` / `UnexpectedResponseError` as an error type (likely one
+- [x] `ArgsParserError` / `UnexpectedResponseError` as an error type (likely one
       `CliError` sum used across the CLI).
-- [ ] `expect_response` — assert a `Response.status` is in an accepted set, else
+- [x] `expect_response` — assert a `Response.status` is in an accepted set, else
       raise. Central helper used by nearly every command.
-- [ ] `print_help` — render a command's usage from its arg spec.
-- [ ] `print_mem_dump` — hex block dump.
+- [x] `print_help` — render a command's usage from its arg spec.
+- [x] `print_mem_dump` — hex block dump.
 - [ ] `print_key_table` — sector/key grid for MIFARE dumps.
-- [ ] `color_string` / color constants — ANSI color helper (keep, it's dependency-free).
+- [x] `color_string` / color constants — ANSI color helper (keep, it's dependency-free).
 - [ ] `prng_successor`, `reconstruct_full_nt`, `parity_to_str`, `_swap_endian` —
       nonce math for the crack paths. Port only when a consumer needs them.
 - [x] `execute_tool` — done in `Chamelean/Tools.lean` (`executeTool`), plus
@@ -75,14 +82,15 @@ Foundation everything else needs. Build this first.
 
 ## Phase 2 — REPL (`chameleon_cli_main.py`)
 
-- [ ] `exec_cmd` — split input, walk the `CLITree`, on a group print children, on a
+- [x] `exec_cmd` — split input, walk the `CLITree`, on a group print children, on a
       leaf parse args and run `before_exec → on_exec → after_exec`.
-- [ ] Command aliases: `quit/q/e → exit`; leading `;#%` → `rem` comment.
-- [ ] `get_cmd_node` — resolve argv against the tree.
-- [ ] `get_prompt` / `print_banner` — prompt string (shows connection + slot), banner.
-- [ ] Main loop — read a line, support multi-line paste split on newlines, dispatch.
-      Plain `IO.getLine` loop (no prompt_toolkit).
-- [ ] Rewrite `Main.lean` to launch this REPL instead of the test harness.
+- [x] Command aliases: `quit/q/e → exit`; leading `;#%` → `rem` comment.
+- [x] `get_cmd_node` — resolve argv against the tree.
+- [x] `get_prompt` / `print_banner` — prompt string (shows connection + slot), banner.
+- [x] Main loop — plain `IO.getLine` loop, one command per line, EOF/`exit` ends it
+      (no prompt_toolkit). Multi-line paste split dropped: `getLine` already yields one
+      line per call.
+- [x] Rewrite `Main.lean` to launch this REPL instead of the test harness.
 
 ## Phase 3 — remaining command wrappers (`chameleon_cmd.py`)
 
@@ -187,8 +195,8 @@ subclasses. Shared behavior (`DeviceRequiredUnit`, `ReaderRequiredUnit`,
 around a runner, not inheritance.
 
 Base-unit behaviors to model first:
-- [ ] `DeviceRequiredUnit` (require open device)
-- [ ] `ReaderRequiredUnit` (auto-switch to reader mode)
+- [x] `DeviceRequiredUnit` (require open device)
+- [x] `ReaderRequiredUnit` (auto-switch to reader mode)
 - [ ] `SlotIndexArgsUnit` / `SlotIndexArgsAndGoUnit` (slot arg; switch active slot, restore after)
 - [ ] `SenseTypeArgsUnit` (`--hf`/`--lf`)
 - [ ] `MF1AuthArgsUnit` (block/key/A-B args), `MFUAuthArgsUnit`

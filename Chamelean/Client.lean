@@ -204,5 +204,15 @@ def setBlePairingEnable (c : Client) (enabled : Bool) : IO Unit := do
   let r ← c.sendCmd .setBlePairingEnable (ByteArray.mk #[if enabled then 1 else 0])
   unless r.ok do throw <| IO.userError s!"setBlePairingEnable failed: {Status.describe r.status}"
 
+/-- Whether the device is in reader mode (`is_device_reader_mode`); false means tag/emulator. -/
+def getDeviceMode (c : Client) : IO Bool := do
+  let r ← c.sendCmd .getDeviceMode
+  return r.data[0]?.getD 0 == 1
+
+/-- Switch between reader mode (`true`) and tag/emulator mode (`change_device_mode`). -/
+def setReaderMode (c : Client) (reader : Bool) : IO Unit := do
+  let r ← c.sendCmd .changeDeviceMode (ByteArray.mk #[if reader then 1 else 0])
+  unless r.ok do throw <| IO.userError s!"changeDeviceMode failed: {Status.describe r.status}"
+
 end Client
 end Chamelean
