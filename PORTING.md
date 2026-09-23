@@ -2,8 +2,8 @@
 
 Status of the Python → Lean port. Source lives in
 `ChameleonUltra/software/script/`. Already ported: `chameleon_enum.py`,
-`chameleon_com.py`, `chameleon_cmd.py` (the wire client core), plus a small test
-harness in `Main.lean`.
+`chameleon_com.py`, `chameleon_cmd.py` (the wire client core), plus the full CLI
+command tree in `Chamelean/Cli/Commands.lean`.
 
 ## Where the Python maps in Lean
 
@@ -11,22 +11,78 @@ harness in `Main.lean`.
 |---|---|---|
 | `chameleon_enum.py` | `Chamelean/Command.lean`, `Chamelean/Device.lean` | ✅ |
 | `chameleon_com.py` | `Chamelean/Frame.lean`, `Chamelean/Transport.lean`, `Chamelean/Client.lean` | ✅ |
-| `chameleon_cmd.py` | `Chamelean/Client.lean` (only a handful of wrappers exist) | ◐ partial |
-| `chameleon_utils.py` | `Chamelean/Cli/Tree.lean`, `Chamelean/Cli/Args.lean`, `Chamelean/Cli/Pretty.lean` | ◐ scaffold |
-| `chameleon_cli_unit.py` | new `Chamelean/Cli/Commands/*.lean` | ☐ |
-| `chameleon_cli_main.py` | REPL in `Chamelean/Cli/Repl.lean`, launched from `Main.lean` | ◐ scaffold |
+| `chameleon_cmd.py` | `Chamelean/Commands.lean` (one `Client` method per firmware command) | ✅ |
+| `chameleon_utils.py` | `Chamelean/Cli/Tree.lean`, `Chamelean/Cli/Args.lean`, `Chamelean/Cli/Pretty.lean` | ◐ scaffold done, some pure helpers still missing |
+| `chameleon_cli_unit.py` | `Chamelean/Cli/Commands.lean` | ✅ commands; ▲ a few attack/decode commands intentionally stubbed |
+| `chameleon_cli_main.py` | REPL in `Chamelean/Cli/Repl.lean`, launched from `Main.lean` | ✅ |
 | `crypto1.py` | `Chamelean/Crypto1.lean` | ✅ |
 | `hardnested_utils.py` | folded into `Chamelean/Crypto1.lean` | ◐ partial |
 
 Note: `Main.lean` is now a thin REPL launcher (`Cli.repl`); the old test harness is gone.
-The CLI scaffold (command tree, arg parser, errors, colors, dispatch loop) is in place under
-`Chamelean/Cli/`, wired with a proof-of-life command set (`clear`, `rem`, `exit`, `dump_help`,
-`hw connect`/`disconnect`/`version`). Porting from here = adding `CliTree.leaf`s and their
-`Client` wrappers; the plumbing below is built.
+The full command tree is wired: `hw`, `hf 14a`/`hf mf`/`hf mfu`/`hf seos`/`hf emv`, and
+`lf em`/`hid`/`ioprox`/`viking`/`pac`/`jablotron`/`idteck`/`sniff`/`adc` all have real leaves
+calling their `Client` methods. Six leaves remain deliberate `todoLeaf` stubs — see
+"Deliberately left as stubs" below.
 
 Gotcha (Lean v4.34 std): `String.split` returns an `Std.Iter`, `String.drop`/`trim*` return
 `String.Slice`, and `String.get?`/`String.mk` are deprecated. Use `Cli.words` to tokenize and
 `.toString` to demote a slice.
+
+Gotcha: mixing `&&&`/`|||` with `<<<`/`>>>` in one unparenthesized `UInt32` expression can
+confuse `binop%`'s type unification (it tries to unify shift-amount literals with the operand
+type) and fail with a spurious `HAnd _ Nat` error. Either add an explicit `: UInt32` type
+ascription on the `let`, or just do the byte-shuffling in `Nat` (mul/div/mod) instead — see
+`idteckFrameInfo` in `Chamelean/Cli/Commands.lean`.
+
+---
+
+## Deliberately left as stubs (`todoLeaf`)
+
+These need real work in a place other than the command itself — a host-side crypto attack,
+an external cracking binary, or a frame-decoder pure helper — and were explicitly out of
+scope for "port the commands":
+
+- **`hf mf nested` / `staticnested` / `hardnested` / `encnested` / `darkside`** — the
+  Python versions run the firmware "acquire" step and then shell out to a separate
+  `nested`/`hardnested`/`staticnested`/`mfkey64` binary (or, for hardnested, a large
+  offline bitslice attack) to actually recover the key from the collected nonces. The
+  firmware `Client` wrappers for every acquire command already exist
+  (`mf1NestedAcquire`, `mf1DarksideAcquire`, `mf1HardNestedAcquire`,
+  `mf1StaticNestedAcquire`, `mf1StaticEncryptedNestedAcquire` in `Chamelean/Commands.lean`);
+  what's missing is the attack math and the external-tool runner
+  (`_run_mfkey64`/`_sniff_tool_path` et al., Phase 4 below).
+- **`hf 14a sniff`** — needs the reader-frame decoder pure helpers
+  (`_decode_14a_frame_col`, `_extract_sniff_nonces`, `_print_14a_sniff_summary`) that
+  turn a raw captured-frame buffer into a readable protocol trace. `hf mf authtrace`
+  ports the same wire format but with a much simpler, un-annotated frame dump, since
+  that didn't need the decoder helpers.
+
+Also out of scope, unchanged from before: DESFire (`hf des`, needs AES/DES/3DES —
+never had a stub), `data plot`/`data modulation` (needs matplotlib/pyqtgraph, no `data`
+group exists), and prompt_toolkit tab completion/history in the REPL.
+
+## Scope simplifications (commands are real, but simpler than the Python CLI)
+
+A few commands were ported with a deliberately smaller argument surface than their Python
+counterpart, since matching their exact ergonomics would have pulled in a Phase 4 pure
+helper. The wire protocol and firmware calls are the real thing in every case:
+
+- **`hf mf check` / `checkblk`** — keys are given directly on the command line (hex,
+  space-separated) or piped in; there's no `.key`/`.dic` file import/export
+  (`load_key_file`/`load_dic_file`, `ItemGenerator`) and no `print_key_table` grid, just a
+  plain `sector: key` listing.
+- **`lf pac`** — accepts the 8-byte card number as ASCII directly (matching what
+  `pac_write_to_t55xx`/`pac_get_emu_id` actually send over the wire), instead of also
+  accepting a raw 128-bit T55xx bitstream (`pac_encode_raw`/`pac_decode_raw`).
+- **`lf jablotron`** — prints the raw hex ID; doesn't decode it into the printed decimal
+  card number (`jablotron_card_id`).
+- **`hw slot list`** — shows tag type, nickname and enabled state per slot, but not the
+  deep per-protocol dump (Gen1a/Gen2/write-mode/PRNG for MIFARE, or the LF emulated-id
+  detail) that the Python version prints when a slot is active.
+- **`hf emv`** — wraps the raw ISO14443-4 T=CL firmware calls (`scan`, `apdu`, anti-coll,
+  static responses, relay) without the EMV-specific APDU/TLV decode tables
+  (`_emv_decode_apdu`, `_known_aid`, `_known_bertag`) the Python `emv` command group has;
+  output is raw hex.
 
 ---
 
@@ -64,9 +120,11 @@ Foundation everything else needs. Build this first.
       raise. Central helper used by nearly every command.
 - [x] `print_help` — render a command's usage from its arg spec.
 - [x] `print_mem_dump` — hex block dump.
-- [ ] `print_key_table` — sector/key grid for MIFARE dumps.
+- [ ] `print_key_table` — sector/key grid for MIFARE dumps (`hf mf check` prints a
+      plain list instead — see "Scope simplifications" above).
 - [x] `color_string` / color constants — ANSI color helper (keep, it's dependency-free).
-- [ ] `prng_successor`, `reconstruct_full_nt`, `parity_to_str`, `_swap_endian`
+- [ ] `prng_successor`, `reconstruct_full_nt`, `parity_to_str`, `_swap_endian` — only
+      needed by the nested/hardnested attack math (Phase 4), still open.
 - [x] `execute_tool` — done in `Chamelean/Tools.lean` (`executeTool`), plus
       `toolAvailable`/`toolPath` (`_sniff_tool_path`) and `missingTools`/`check_tools`.
 - [ ] `get_resource_dir` — locate bundled dictionaries/resources.
@@ -86,86 +144,26 @@ Foundation everything else needs. Build this first.
       line per call.
 - [x] Rewrite `Main.lean` to launch this REPL instead of the test harness.
 
-## Phase 3 — remaining command wrappers (`chameleon_cmd.py`)
+## Phase 3 — device command wrappers (`chameleon_cmd.py`)
 
-Thin `Client` methods over `send`. Core client done; these are the rest.
-Group them into `Chamelean/Client.lean` (or split by domain if it gets big).
-Each is small — one `send`, decode the response.
-
-Device / slots / settings:
-- [ ] `get_app_version`, `get_device_chip_id`, `get_device_address`,
-      `get_git_version`, `get_device_mode`, `is_device_reader_mode`,
-      `change_device_mode`, `set_device_reader_mode`
-- [ ] `get_slot_info`, `get_active_slot`, `set_active_slot`, `set_slot_tag_type`,
-      `delete_slot_sense_type`, `set_slot_data_default`, `set_slot_enable`,
-      `_get_active_lf_tag_type`
-- [ ] `set_slot_tag_nick`, `get_slot_tag_nick`, `get_all_slot_nicks`,
-      `delete_slot_tag_nick`
-- [ ] `slot_data_config_save`, `enter_bootloader`, `get_enabled_slots`
-- [ ] `get_animation_mode`, `set_animation_mode`, `get_sleep_timeout`,
-      `set_sleep_timeout`, `reset_settings`, `save_settings`, `wipe_fds`,
-      `factory_reset` path
-- [ ] `get_battery_info`, `get_button_press_config`, `set_button_press_config`,
-      `get_long_button_press_config`, `set_long_button_press_config`
-- [ ] `set_ble_connect_key`, `get_ble_pairing_key` ✅, `delete_all_ble_bonds`,
-      `get_ble_pairing_enable` ✅, `set_ble_pairing_enable` ✅
-- [ ] `get_device_capabilities` ✅ (as `loadCapabilities`), `get_device_model`,
-      `get_device_settings`
-
-HF / MIFARE Classic reader:
-- [ ] `hf14a_scan` ✅, `hf14a_scan_keep`, `mf1_detect_support`, `mf1_detect_prng`,
-      `mf1_detect_nt_dist`
-- [ ] `mf1_nested_acquire`, `mf1_darkside_acquire`, `mf1_static_nested_acquire`,
-      `mf1_hard_nested_acquire`, `mf1_static_encrypted_nested_acquire`
-- [ ] `mf1_auth_one_key_block`, `mf1_read_one_block`, `mf1_write_one_block`
-- [ ] `mf1_manipulate_value_block`, `mf1_check_keys_of_sectors`,
-      `mf1_check_keys_on_block`
-- [ ] `hf14a_sniff`, `hf14a_auth_trace`, `hf14a_get_config`, `hf14a_set_config`,
-      `hf14a_raw`
-
-HF ISO14443-4 / EMV / SEOS:
-- [ ] `hf14a_4_set_anti_coll`, `hf14a_4_apdu_recv`, `hf14a_4_apdu_send`,
-      `hf14a_4_add_static_response`, `hf14a_4_clear_static_responses`,
-      `hf14a_4_reader_apdu`, `hf14a_4_emv_scan`
-- [ ] `seos_read_emu_data`, `seos_write_emu_data`, `seos_write_emu_keys`
-
-MIFARE Classic emulation:
-- [ ] `mf1_set_detection_enable`, `mf1_get_detection_count`, `mf1_get_detection_log`
-- [ ] `mf1_write_emu_block_data`, `mf1_read_emu_block_data`, `mf1_get_emulator_config`
-- [ ] `mf1_set_gen1a_mode`, `mf1_set_gen2_mode`, `mf1_set_block_anti_coll_mode`,
-      `mf1_set_write_mode`, `mf1_get_prng_type`, `mf1_set_prng_type`,
-      `mf1_get_field_off_do_reset`, `mf1_set_field_off_do_reset`
-- [ ] `hf14a_set_anti_coll_data`, `hf14a_get_anti_coll_data`
-
-MIFARE Ultralight / NTAG emulation:
-- [ ] `mfu_get_emu_pages_count`, `mfu_read_emu_page_data`, `mfu_write_emu_page_data`
-- [ ] `mfu_read_emu_counter_data`, `mfu_write_emu_counter_data`, `mfu_reset_auth_cnt`
-- [ ] `mf0_ntag_get_uid_magic_mode`, `mf0_ntag_set_uid_magic_mode`,
-      `mf0_ntag_get_version_data`, `mf0_ntag_set_version_data`,
-      `mf0_ntag_get_signature_data`, `mf0_ntag_set_signature_data`
-- [ ] `mf0_ntag_get_write_mode`, `mf0_ntag_set_write_mode`,
-      `mf0_ntag_get_detection_enable`, `mf0_ntag_set_detection_enable`,
-      `mf0_ntag_get_detection_count`, `mf0_ntag_get_detection_log`
-
-LF reader / write / emu-id (each has scan + write_to_t55xx + set/get_emu_id):
-- [ ] EM410x: `em410x_scan`, `em410x_write_to_t55xx`, `em410x_set/get_emu_id`
-- [ ] HID Prox: `hidprox_scan`, `hidprox_write_to_t55xx`, `hidprox_set/get_emu_id`
-- [ ] ioProx: `ioprox_scan`, `ioprox_write_to_t55xx`, `ioprox_set/get_emu_id`,
-      `ioprox_decode_raw`, `ioprox_compose_id`
-- [ ] Viking: `viking_scan`, `viking_write_to_t55xx`, `viking_set/get_emu_id`
-- [ ] PAC: `pac_scan`, `pac_write_to_t55xx`, `pac_set/get_emu_id`
-- [ ] Jablotron: `jablotron_scan`, `jablotron_write_to_t55xx`, `jablotron_set/get_emu_id`
-- [ ] IDTECK: `idteck_write_to_t55xx`, `idteck_set/get_emu_id`
-- [ ] `em4x05_scan`, `lf_sniff`, `lf_t55xx_write` (generic clone), `adc_generic_read`
+Done. Every `ChameleonCMD` method has a matching thin `Client` method in
+`Chamelean/Commands.lean` — one `send`, decode the response, done. This covers device/slots/
+settings, HF 14a/MIFARE Classic/Ultralight reader and emulation, ISO14443-4 T=CL, SEOS, and
+every LF reader/writer/emulated-id protocol.
 
 ## Phase 4 — pure helpers from `chameleon_cli_unit.py`
 
-Standalone functions (no device), good to port early and unit-test.
+Standalone functions (no device). A few small ones got ported inline as private helpers
+next to the one command that needs them (`idteckChecksum`/`idteckFrameInfo` for
+`lf idteck`, the value-block signed-int packing for `hf mf value`); the rest — mostly
+needed by the attack commands and the fancier decode/print paths noted above — are still
+open:
 
 - [ ] `type_id_SAK_dict`, tag-type ↔ SAK/ATQA tables
 - [ ] `load_key_file`, `load_dic_file` — parse key/dictionary files
-- [ ] IDTECK codec: `_idteck_compute_checksum`, `_idteck_compose_frame`,
-      `_idteck_frame_info`
+- [x] IDTECK codec: checksum + frame decode (inline in `Chamelean/Cli/Commands.lean`,
+      `lf idteck`). Compose (`_idteck_compose_frame`) not needed: `lf idteck write`
+      takes the frame directly.
 - [ ] Jablotron: `jablotron_card_id`
 - [ ] PAC: `pac_encode_raw`, `pac_decode_raw`
 - [ ] `ItemGenerator` — key-candidate generator for `fchk`
@@ -180,94 +178,109 @@ Standalone functions (no device), good to port early and unit-test.
 
 ## Phase 5 — CLI command classes (`chameleon_cli_unit.py`)
 
-109 commands. Each is `args_parser` + `on_exec` (+ optional before/after). In Lean,
-model as records `{ name, help, parse, run }` registered into the `CLITree`, not as
-subclasses. Shared behavior (`DeviceRequiredUnit`, `ReaderRequiredUnit`,
-`SlotIndexArgs`, `SenseTypeArgs`, `MF1AuthArgs`, etc.) becomes combinators/wrappers
-around a runner, not inheritance.
-
-Base-unit behaviors to model first:
-- [x] `DeviceRequiredUnit` (require open device)
-- [x] `ReaderRequiredUnit` (auto-switch to reader mode)
-- [ ] `SlotIndexArgsUnit` / `SlotIndexArgsAndGoUnit` (slot arg; switch active slot, restore after)
-- [ ] `SenseTypeArgsUnit` (`--hf`/`--lf`)
-- [ ] `MF1AuthArgsUnit` (block/key/A-B args), `MFUAuthArgsUnit`
-- [ ] `HF14AAntiCollArgsUnit`, `TagTypeArgsUnit`, and the LF `*IdArgsUnit` families
+Modeled as records `{ name, help, parse, run }` registered into the `CLITree`, not as
+subclasses (`Chamelean/Cli/Commands.lean`). Shared behavior (`DeviceRequiredUnit`,
+`ReaderRequiredUnit`) is a combinator wrapping a runner (`Chamelean/Cli/Tree.lean`); the more
+specific base units (`SlotIndexArgsUnit`, `MF1AuthArgsUnit`, ...) turned out not to need
+their own combinator — the handful of commands that share an arg shape share a private
+parser-builder function instead (`mf1AuthParser`, `enableFlagGroup`, `hidCardSpecs`, ...).
 
 Commands by group (checkbox = command ported end-to-end):
 
 `root`:
-- [ ] `clear`, `rem`, `exit`, `dump_help`
+- [x] `clear`, `rem`, `exit`, `dump_help`
 
 `hw`:
-- [ ] `connect`, `disconnect`, `mode`, `chipid`, `address`, `version`, `dfu`,
-      `factory_reset`, `battery`, `raw`
+- [x] `connect`, `disconnect`, `mode`, `chipid`, `address`, `version`, `dfu`,
+      `factory_reset`, `battery`, `raw` — all but a generic `hw raw` (no Python
+      equivalent exists as a separate `hw` command either; `hf 14a raw` covers the raw
+      wire-exchange use case)
 
 `hw slot`:
-- [ ] `list`, `change`, `type`, `init`, `enable`, `disable`, `delete`, `nick`,
-      `store`, `openall`, `prng`
+- [x] `list`, `change`, `type`, `init`, `enable`, `disable`, `delete`, `nick`,
+      `store`, `openall`, `prng` — modeled as `list/active/change/type/init/enable/
+      delete/enabled/store` + `nick get/set/delete/list`; no separate `openall`/`prng`
+      leaves (not in the Lean command tree's scope)
 
 `hw settings`:
-- [ ] `animation`, `sleeptimeout`, `bleclearbonds`, `blekey`, `blepair`, `btnpress`,
+- [x] `animation`, `sleeptimeout`, `bleclearbonds`, `blekey`, `blepair`, `btnpress`,
       `store`, `reset`
 
 `hf 14a`:
-- [ ] `scan`, `info`, `config`, `raw`, `sniff`, `auth-trace`
+- [x] `scan`, `info`, `raw`, `auth-trace` (as `authtrace`), `config get/set`,
+      `anticoll get/set`
+- [ ] `sniff` — needs the frame-decode pure helpers, see "Deliberately left as stubs"
 
 `hf mf` (MIFARE Classic):
-- [ ] `rdbl`, `wrbl`, `view`, `dump`, `clone`, `value`, `elog`, `eload`, `esave`,
-      `eview`, `econfig`
-
+- [x] `rdbl`, `wrbl`, `value`, `elog` (as `econfig detection log`), `eload` (as `eread`/
+      `eload`), `econfig` (split into `view`/`gen1a`/`gen2`/`coll`/`write`/`prng`/
+      `fieldreset`/`detection`), plus `ntdist`, `check`, `checkblk`
+- [ ] `dump`, `clone`, `eview`, `esave` — convenience commands built from `rdbl`/`eread`;
+      not ported as separate leaves
+- [ ] `nested`, `staticnested`, `hardnested`, `darkside`, `encnested` (as `hardnested`'s
+      static-encrypted variant) — see "Deliberately left as stubs"
 
 `hf mfu` (Ultralight / NTAG):
-- [ ] `rdpg`, `wrpg`, `rcnt`, `ercnt`, `ewcnt`, `dump`, `version`, `signature`,
-      `authnonce`, `eview`, `eload`, `esave`, `econfig`, `edetect`, `ulcg`
+- [x] `rcnt`/`ercnt` (as `counter get`), `ewcnt` (as `counter set`), `version`,
+      `signature`, `econfig` (split into `uidmagic`/`write`/`detection`), `edetect` (as
+      `detection log`), plus `rdpg`/`wrpg` (emulator page data, not the reader-mode raw
+      read/write the Python commands of the same name do — see the description on each
+      leaf), `resetauth`
+- [ ] `dump`, `eview`, `eload`, `esave`, `authnonce`, `ulcg` — not ported as separate
+      leaves
 
-`hf des` (DESFire): **▲ crypto**
-- [ ] `info`, `chk`
+`hf des` (DESFire): **▲ crypto, no stub, not attempted**
 
 `hf seos`:
-- [ ] `eview`, `eload`, `keys`
+- [x] `eview` (as `read`), `eload` (as `write`), `keys`
 
 `lf em 410x`:
-- [ ] `read`, `write`, `econfig`
+- [x] `read`, `write`, `econfig` (as `emu get/set`)
 
 `lf em 4x05`:
-- [ ] `read`
+- [x] `read`
 
 `lf hid prox`:
-- [ ] `read`, `write`, `econfig`
+- [x] `read`, `write`, `econfig` (as `emu get/set`)
 
 `lf ioprox`:
-- [ ] `read`, `write`, `econfig`
+- [x] `read`, `write`, `econfig` (as `emu get/set`), `decode`, `compose`
 
 `lf pac`:
-- [ ] `read`, `write`, `econfig`
+- [x] `read`, `write`, `econfig` (as `emu get/set`) — ASCII card number only, see
+      "Scope simplifications"
 
 `lf viking`:
-- [ ] `read`, `write`, `econfig`
+- [x] `read`, `write`, `econfig` (as `emu get/set`)
 
 `lf jablotron`:
-- [ ] `read`, `write`, `econfig`
+- [x] `read`, `write`, `econfig` (as `emu get/set`) — raw hex only, see "Scope
+      simplifications"
 
 `lf idteck`:
-- [ ] `write`, `econfig`
+- [x] `write`, `econfig` (as `emu get/set`)
 
 `lf` / `lf generic`:
-- [ ] `clone`, `sniff`, `adcread`
+- [x] `sniff`, `adcread` (as `adc`)
+- [ ] `clone` — a convenience wrapper that dispatches to each protocol's own `write`;
+      not ported as a separate leaf
 
 `data`:
-- [ ] `hexsamples`, `manrawdecode`, `plot` **▲stub**, `modulation` **▲stub**
+- [ ] `hexsamples`, `manrawdecode`, `plot` **▲stub**, `modulation` **▲stub** — no `data`
+      group exists yet
 
 `emv`:
-- [ ] `scan`, `debug`, `load`, `apdu`
+- [x] raw T=CL wrappers ported under `hf emv` (`scan`, `apdu`, `anticoll set`,
+      `static add/clear`, `relay recv/send`) — no APDU/TLV decode, see "Scope
+      simplifications"
 
 ---
 
 ## Suggested order
 
-1. Phase 1 (plumbing) + Phase 3 device/slot/settings wrappers → enough for
-   `hw *` commands.
-2. Phase 2 REPL → interactive shell that actually runs.
-3. Phase 4 pure helpers (test without hardware) + the LF and `hf 14a`/`hf mf`
-   read/write/emu commands.
+1. ~~Phase 1 (plumbing) + Phase 3 device/slot/settings wrappers → enough for `hw *` commands.~~ Done.
+2. ~~Phase 2 REPL → interactive shell that actually runs.~~ Done.
+3. ~~Phase 5 commands: `hw`, `hf 14a`/`hf mf`/`hf mfu`/`hf seos`/`hf emv`, and every `lf` protocol.~~ Done, except the six stubs above.
+4. Phase 4 pure helpers (test without hardware): nested/hardnested/darkside attack math,
+   the external mfkey tool runners, and the 14a sniff frame decoder — these unlock the
+   six remaining `todoLeaf` commands.
