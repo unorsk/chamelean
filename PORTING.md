@@ -38,11 +38,6 @@ Flag these now so we don't discover them mid-port.
 - **`▲ out of scope / stub`** — `data plot` and `data modulation` render with
   matplotlib/pyqtgraph. No plotting without deps. Port the math, stub or drop the
   GUI.
-- **`✅ external binaries` (plumbing done)** — `nested`, `darkside`, `hardnested`,
-  `staticnested`, `mfkey32/64`, `fchk`, `autopwn` shell out to compiled crackers.
-  The invocation layer is ported: `Chamelean/Tools.lean` (`executeTool`,
-  `toolAvailable`, `missingTools`), mirroring the `stty`/`nc` process use. Each
-  command still has to call it or stub `on_exec` (phase 5).
 - **`✅ crypto` (Crypto1 done)** — `Chamelean/Crypto1.lean` ports `crypto1.py`,
   verified byte-identical to the reference (keystream, PRNG, `mfkey32`). DESFire's
   DES/3DES/AES is still unported and remains the open crypto question.
@@ -71,8 +66,7 @@ Foundation everything else needs. Build this first.
 - [x] `print_mem_dump` — hex block dump.
 - [ ] `print_key_table` — sector/key grid for MIFARE dumps.
 - [x] `color_string` / color constants — ANSI color helper (keep, it's dependency-free).
-- [ ] `prng_successor`, `reconstruct_full_nt`, `parity_to_str`, `_swap_endian` —
-      nonce math for the crack paths. Port only when a consumer needs them.
+- [ ] `prng_successor`, `reconstruct_full_nt`, `parity_to_str`, `_swap_endian`
 - [x] `execute_tool` — done in `Chamelean/Tools.lean` (`executeTool`), plus
       `toolAvailable`/`toolPath` (`_sniff_tool_path`) and `missingTools`/`check_tools`.
 - [ ] `get_resource_dir` — locate bundled dictionaries/resources.
@@ -174,7 +168,7 @@ Standalone functions (no device), good to port early and unit-test.
       `_idteck_frame_info`
 - [ ] Jablotron: `jablotron_card_id`
 - [ ] PAC: `pac_encode_raw`, `pac_decode_raw`
-- [ ] `ItemGenerator` — key-candidate generator for `fchk`/`autopwn`
+- [ ] `ItemGenerator` — key-candidate generator for `fchk`
 - [ ] EMV decode: `_emv_decode_apdu`, `_decode_sw`, `_known_aid`, `_known_bertag`
 - [ ] 14a sniff decode: `_decode_14a_frame_col`, `_extract_sniff_nonces`,
       `_print_14a_sniff_summary`, `_get_capture`
@@ -183,8 +177,6 @@ Standalone functions (no device), good to port early and unit-test.
       `_desfire_get_version` (+ the `_DESFIRE_*` tables). **▲ needs crypto1/AES/DES.**
 - [ ] mfkey tool runners: `_sniff_tool_path`, `_run_mfkey64`, `_run_mfkey32v2`,
       `_run_mfkey32v2_sniff`. **▲ external binaries.**
-- [ ] `CrackEffect` (UL-C crack helper), `_plot_matplotlib`, `_plot_pyqtgraph`.
-      **▲ plotting out of scope.**
 
 ## Phase 5 — CLI command classes (`chameleon_cli_unit.py`)
 
@@ -225,7 +217,7 @@ Commands by group (checkbox = command ported end-to-end):
 `hf mf` (MIFARE Classic):
 - [ ] `rdbl`, `wrbl`, `view`, `dump`, `clone`, `value`, `elog`, `eload`, `esave`,
       `eview`, `econfig`
-- [ ] `nested`, `darkside`, `hardnested`, `senested`, `autopwn`, `fchk` **▲ crackers**
+
 
 `hf mfu` (Ultralight / NTAG):
 - [ ] `rdpg`, `wrpg`, `rcnt`, `ercnt`, `ewcnt`, `dump`, `version`, `signature`,
@@ -270,15 +262,6 @@ Commands by group (checkbox = command ported end-to-end):
 `emv`:
 - [ ] `scan`, `debug`, `load`, `apdu`
 
-## Phase 6 — crypto (only if crack/DESFire paths are wanted)
-
-- [x] `crypto1.py` → `Chamelean/Crypto1.lean` (Crypto1 cipher, LFSR, filter fn,
-      PRNG, `mfkey32HasKey`) — verified against the Python reference
-- [~] `hardnested_utils.py` — parity helper ported (`evenParityU8`); the
-      first-byte nonce-sum bookkeeping still to fold in when `hardnested` lands
-- [ ] DES / 3DES / AES for DESFire auth (needed by `hf des`). No stdlib crypto in
-      Lean core — **▲ big; decide if in scope.**
-
 ---
 
 ## Suggested order
@@ -288,4 +271,3 @@ Commands by group (checkbox = command ported end-to-end):
 2. Phase 2 REPL → interactive shell that actually runs.
 3. Phase 4 pure helpers (test without hardware) + the LF and `hf 14a`/`hf mf`
    read/write/emu commands.
-4. Leave crackers, DESFire, EMV crypto, and plotting for last (or stub them).

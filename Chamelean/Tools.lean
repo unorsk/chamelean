@@ -1,7 +1,4 @@
 /-!
-Running the optional native cracking binaries (`nested`, `darkside`, `mfkey32v2`, `mfkey64`,
-`staticnested*`). Port of `chameleon_utils.execute_tool` and `check_tools`.
-
 These ship as separate executables in a `bin/` directory next to the client; the MIFARE
 attack commands shell out to them. The tools are optional, so `available` lets the CLI warn
 up front instead of failing mid-attack. Mirrors the `IO.Process` use in `Transport.lean`;
@@ -41,7 +38,7 @@ def missingTools (dir : System.FilePath := defaultToolDir) : IO (Array String) :
 /--
 Run a native tool and return its combined stdout+stderr. Throws if the binary is absent or
 exits non-zero (carrying the captured output), matching `execute_tool`. `workDir` is where the
-tool runs; the crackers write scratch files there, so it defaults to a fresh temp directory.
+tool runs; some tools write scratch files there, so it defaults to a fresh temp directory.
 -/
 def executeTool (name : String) (args : Array String)
     (dir : System.FilePath := defaultToolDir) (workDir : Option System.FilePath := none)
