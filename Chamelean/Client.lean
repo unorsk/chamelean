@@ -165,19 +165,20 @@ def loadCapabilities (c : Client) : IO (Array UInt16) := do
 /--
 Scan for ISO14443-A (13.56 MHz) tags in the field. The device must be in reader mode
 (`changeDeviceMode`); an empty result means the field is clear, an error status is raised.
+If keep is True, it sends .hf14aScanKeep which leaves the antenna on
 -/
-def hf14aScan (c : Client) : IO (Array Tag14a) := do
-  let r ← c.sendCmd .hf14aScan
+def hf14aScan (c : Client) (keep : Bool) : IO (Array Tag14a) := do
+  let r ← c.sendCmd (if keep then .hf14aScanKeep else .hf14aScan)
   -- This command reports success as HF_TAG_OK (0x00), not the device-wide SUCCESS (0x68).
   if r.status == Status.hfTagNo.toUInt16 then return #[]
   unless r.status == Status.hfTagOk.toUInt16 do
     throw <| IO.userError s!"hf14aScan failed: {Status.describe r.status} \
       (is the device in reader mode? changeDeviceMode 01)"
+  -- Back-to-back records, no count byte: uidlen[1]|uid|atqa[2]|sak[1]|atslen[1]|ats
   let d := r.data
-  let count := (d[0]?.getD 0).toNat
   let mut tags : Array Tag14a := #[]
-  let mut o := 1  -- byte 0 is the tag count
-  for _ in [0:count] do
+  let mut o := 0
+  while o < d.size do
     let uidLen := (d[o]?.getD 0).toNat; o := o + 1
     let uid := d.extract o (o + uidLen); o := o + uidLen
     let atqa := d.extract o (o + 2); o := o + 2

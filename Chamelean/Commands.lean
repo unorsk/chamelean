@@ -103,9 +103,6 @@ def mf1ReadOneBlock (c : Client) (block keyType : UInt8) (key : ByteArray) : IO 
 def mf1WriteOneBlock (c : Client) (block keyType : UInt8) (key blockData : ByteArray) : IO Response :=
   c.sendCmd .mf1WriteOneBlock (concat [b1 keyType, b1 block, key, blockData])
 
-/-- Like `hf14aScan`, but leaves the RF field on so raw APDUs can follow. -/
-def hf14aScanKeep (c : Client) : IO Response := c.sendCmd .hf14aScanKeep
-
 /-- Collect static-nested nonces (for tags with a static PRNG). -/
 def mf1StaticNestedAcquire (c : Client) (block keyType : UInt8) (key : ByteArray)
     (targetBlock targetType : UInt8) : IO Response :=

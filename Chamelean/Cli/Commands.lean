@@ -1,5 +1,6 @@
 import Chamelean.Cli.Tree
 import Chamelean.Cli.Pretty
+import Chamelean.Cli.Watch
 import Chamelean.Commands
 
 /-!
@@ -33,15 +34,36 @@ private def grp (name help : String) (children : List CliTree) : CliTree :=
 
 /-! ## Wired commands -/
 
+private def printTag (t : Tag14a) : IO Unit := do
+  IO.println s!"- UID : {toHex t.uid}"
+  IO.println s!"  ATQA: {toHex t.atqa}  SAK: {hexByte t.sak}"
+  unless t.ats.isEmpty do IO.println s!"  ATS : {toHex t.ats}"
+
 private def scanCmd : CliTree :=
   mkLeaf "scan" "Scan for ISO14443-A tags" { description := "Scan for ISO14443-A tags" } <|
     readerRequired fun c _ => do
-      let tags ← c.hf14aScan
+      let tags ← c.hf14aScan false
       if tags.isEmpty then IO.println "No tag found."
-      for t in tags do
-        IO.println s!"- UID : {toHex t.uid}"
-        IO.println s!"  ATQA: {toHex t.atqa}  SAK: {hexByte t.sak}"
-        unless t.ats.isEmpty do IO.println s!"  ATS : {toHex t.ats}"
+      tags.forM printTag
+
+private def scanKeepCmd : CliTree :=
+  mkLeaf "scankeep" "Scan, keeping the RF field alive"
+      { description := "Scan once and leave the tag powered for raw exchanges" } <|
+    readerRequired fun c _ => do
+      let tags ← c.hf14aScan true
+      if tags.isEmpty then IO.println "No tag found."
+      tags.forM printTag
+
+private def watchCmd : CliTree :=
+  mkLeaf "watch" "Keep scanning, printing tags as they appear"
+      { description := "Keep scanning for ISO14443-A tags until ESC" } <|
+    readerRequired fun c _ =>
+      -- The state is the UIDs in the field last time, so a tag prints once per arrival.
+      watchLoop (#[] : Array ByteArray) fun seen => do
+        let tags ← c.hf14aScan false
+        for t in tags do
+          unless seen.contains t.uid do printTag t
+        return tags.map (·.uid)
 
 private def chipIdCmd : CliTree :=
   mkLeaf "chipid" "Get device chip id" { description := "Get device chip id" } <|
@@ -202,7 +224,8 @@ def hfGroup : CliTree :=
   grp "hf" "High-frequency (13.56 MHz) commands" [
     grp "14a" "ISO14443-A" [
       scanCmd,
-      todoLeaf "scankeep" "Scan, keeping the RF field alive",
+      scanKeepCmd,
+      watchCmd,
       todoLeaf "raw" "Send a raw ISO14443-A exchange",
       todoLeaf "sniff" "Sniff reader frames",
       grp "config" "Reader config" [ todoLeaf "get" "Get HF14A config", todoLeaf "set" "Set HF14A config" ],
