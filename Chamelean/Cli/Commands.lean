@@ -116,12 +116,49 @@ private def unwrap (r : Except CliError α) : IO α :=
   | .ok a => pure a
   | .error e => throw e.toIO
 
+/-- Run a device call and unwrap its response, raising a `CliError` on a status outside
+`accepted` (default: device-wide SUCCESS). Collapses the `unwrap (expectResponse ...)` pattern
+that every wired command uses. -/
+private def okData (label : String) (call : IO Response)
+    (accepted : List UInt16 := [Status.success.toUInt16]) : IO ByteArray := do
+  unwrap (expectResponse (← call) accepted label)
+
+/-- `okData`, accepting `HF_TAG_OK` (the status a reader command returns for a present tag). -/
+private def okHf (label : String) (call : IO Response) : IO ByteArray :=
+  okData label call [Status.hfTagOk.toUInt16]
+
+/-- `okData`, accepting `LF_TAG_OK` (the status a reader command returns for a present tag). -/
+private def okLf (label : String) (call : IO Response) : IO ByteArray :=
+  okData label call [Status.lfTagOk.toUInt16]
+
 /-- The constructor of `all` whose `name` matches `s`, if any. -/
 private def parseEnum (all : Array α) (name : α → String) (s : String) : Option α :=
   all.find? (fun x => name x == s)
 
 private def enumChoices (all : Array α) (name : α → String) : List String :=
   all.toList.map name
+
+/-- The `key` int arg, clamped to `0..hi` (default `255`), else raise a usage error. -/
+private def byteArg (a : Args) (key : String) (label : String) (hi : Nat := 255) : IO UInt8 := do
+  let v := (a.int? key).getD 0
+  if v < 0 ∨ (hi : Int) < v then throw (CliError.usage label).toIO
+  return v.toNat.toUInt8
+
+/-- The `key` hex arg (or `default` if absent), requiring it to be exactly `len` bytes. -/
+private def hexArg (a : Args) (key : String) (len : Nat) (label : String)
+    (default : ByteArray := .empty) : IO ByteArray := do
+  let v := (a.hex? key).getD default
+  unless v.size == len do throw (CliError.usage label).toIO
+  return v
+
+/-- `-a`/`-b` selects a MIFARE key type; defaults to A. -/
+private def keyTypeArg (a : Args) : MfcKeyType := if a.has "b" then .b else .a
+
+/-- Decode a hex string, raising a `CliError.usage` on malformed input. -/
+private def parseHex (s : String) : IO ByteArray :=
+  match Cli.ofHex s with
+  | .ok b => pure b
+  | .error e => throw (CliError.usage e).toIO
 
 private def forceFlag : ArgSpec :=
   { key := "force", names := ["--force"], kind := .flag, help := "Just to be sure" }
@@ -146,7 +183,7 @@ private def factoryResetCmd : CliTree :=
 private def settingsDumpCmd : CliTree :=
   mkLeaf "dump" "Dump all settings" { description := "Dump all settings" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.getDeviceSettings) [Status.success.toUInt16] "settings dump")
+      let d ← okData "settings dump" (c.getDeviceSettings)
       let animation := (AnimationMode.ofUInt8? d[1]!).map toString |>.getD "unknown"
       let btn (i : Nat) := (ButtonPressFunction.ofUInt8? d[i]!).map toString |>.getD "unknown"
       IO.println s!"Settings version : {d[0]!}"
@@ -174,7 +211,7 @@ private def settingsResetCmd : CliTree :=
 private def animationGetCmd : CliTree :=
   mkLeaf "get" "Get animation mode" { description := "Get animation mode" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.getAnimationMode) [Status.success.toUInt16] "animation get")
+      let d ← okData "animation get" (c.getAnimationMode)
       IO.println ((AnimationMode.ofUInt8? d[0]!).map toString |>.getD "unknown")
 
 private def animationSetCmd : CliTree :=
@@ -186,14 +223,14 @@ private def animationSetCmd : CliTree :=
     deviceRequired fun c a => do
       let some mode := parseEnum AnimationMode.all (·.name) (a.str? "mode" |>.getD "")
         | throw (CliError.usage "invalid mode").toIO
-      let _ ← unwrap (expectResponse (← c.setAnimationMode mode) [Status.success.toUInt16] "animation set")
+      let _ ← okData "animation set" (c.setAnimationMode mode)
       IO.println (green "Animation mode change success.")
       IO.println (yellow "Do not forget to store your settings in flash!")
 
 private def sleepGetCmd : CliTree :=
   mkLeaf "get" "Get sleep timeout" { description := "Get the post-wakeup sleep timeout" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.getSleepTimeout) [Status.success.toUInt16] "sleep get")
+      let d ← okData "sleep get" (c.getSleepTimeout)
       IO.println s!"Current wake timeout: {d[0]!} seconds"
 
 private def sleepSetCmd : CliTree :=
@@ -205,8 +242,7 @@ private def sleepSetCmd : CliTree :=
       let secs := (a.int? "seconds").getD 0
       if secs < 5 ∨ 60 < secs then
         throw (CliError.usage "value must be between 5 and 60 seconds").toIO
-      let _ ← unwrap (expectResponse (← c.setSleepTimeout secs.toNat.toUInt8) [Status.success.toUInt16]
-        "sleep set")
+      let _ ← okData "sleep set" (c.setSleepTimeout secs.toNat.toUInt8)
       IO.println s!"Wake timeout set to {secs} seconds."
       if secs ≥ 30 then IO.println (yellow "Warning: a long wake timeout will drain the battery faster.")
       IO.println (yellow "Do not forget to store your settings in flash!")
@@ -226,9 +262,8 @@ private def buttonGetCmd (long : Bool) : CliTree :=
       (if long then "Get long-press function" else "Get short-press function") (buttonParser) <|
     deviceRequired fun c a => do
       let btn := buttonArg a
-      let d ← unwrap (expectResponse
-        (← if long then c.getLongButtonPressConfig btn else c.getButtonPressConfig btn)
-        [Status.success.toUInt16] "button get")
+      let d ← okData "button get"
+        (if long then c.getLongButtonPressConfig btn else c.getButtonPressConfig btn)
       IO.println ((ButtonPressFunction.ofUInt8? d[0]!).map toString |>.getD "unknown")
 
 private def buttonSetCmd (long : Bool) : CliTree :=
@@ -240,9 +275,8 @@ private def buttonSetCmd (long : Bool) : CliTree :=
       let btn := buttonArg a
       let some fn := parseEnum ButtonPressFunction.all (·.name) (a.str? "function" |>.getD "")
         | throw (CliError.usage "invalid function").toIO
-      let _ ← unwrap (expectResponse
-        (← if long then c.setLongButtonPressConfig btn fn else c.setButtonPressConfig btn fn)
-        [Status.success.toUInt16] "button set")
+      let _ ← okData "button set"
+        (if long then c.setLongButtonPressConfig btn fn else c.setButtonPressConfig btn fn)
       IO.println (green s!"Successfully set function '{fn}' to Button {btn} \
         {if long then "long-press" else "short-press"}")
       IO.println (yellow "Do not forget to store your settings in flash!")
@@ -255,7 +289,7 @@ private def blekeySetCmd : CliTree :=
       let key := a.str? "key" |>.getD ""
       unless key.length == 6 ∧ key.toList.all (·.isDigit) do
         throw (CliError.usage "the BLE pairing key must be 6 ASCII digits").toIO
-      let _ ← unwrap (expectResponse (← c.setBleConnectKey key) [Status.success.toUInt16] "blekey set")
+      let _ ← okData "blekey set" (c.setBleConnectKey key)
       IO.println (green s!"Successfully set ble connect key to: {key}")
       IO.println (yellow "Do not forget to store your settings in flash!")
 
@@ -277,7 +311,7 @@ private def blebondsClearCmd : CliTree :=
     { description := "Clear all BLE bindings. Effect is immediate!", specs := [forceFlag] } <|
     deviceRequired fun c a => do
       if ← requireForce a then
-        let _ ← unwrap (expectResponse (← c.deleteAllBleBonds) [Status.success.toUInt16] "blebonds_clear")
+        let _ ← okData "blebonds_clear" (c.deleteAllBleBonds)
         IO.println (green " - Successfully cleared all bonds")
 
 /-! ### `hw slot` -/
@@ -289,7 +323,7 @@ private def slotArg (c : Client) (a : Args) : IO SlotNumber := do
     let some s := SlotNumber.ofUInt8? n.toNat.toUInt8 | throw (CliError.usage "slot must be 1..8").toIO
     return s
   | none =>
-    let d ← unwrap (expectResponse (← c.getActiveSlot) [Status.success.toUInt16] "get active slot")
+    let d ← okData "get active slot" (c.getActiveSlot)
     let some s := SlotNumber.ofFw? d[0]! | throw (CliError.other "device returned an invalid slot").toIO
     return s
 
@@ -315,9 +349,9 @@ private def tagTypeArg (a : Args) : IO TagSpecificType := do
 private def slotListCmd : CliTree :=
   mkLeaf "list" "List slot tag types" { description := "List information about all 8 slots" } <|
     deviceRequired fun c _ => do
-      let info ← unwrap (expectResponse (← c.getSlotInfo) [Status.success.toUInt16] "slot list")
-      let selected ← unwrap (expectResponse (← c.getActiveSlot) [Status.success.toUInt16] "slot list")
-      let enabled ← unwrap (expectResponse (← c.getEnabledSlots) [Status.success.toUInt16] "slot list")
+      let info ← okData "slot list" (c.getSlotInfo)
+      let selected ← okData "slot list" (c.getActiveSlot)
+      let enabled ← okData "slot list" (c.getEnabledSlots)
       for slot in SlotNumber.all do
         let fw := slot.toFw.toNat
         let hf := TagSpecificType.ofUInt16? (readU16 info (fw * 4))
@@ -333,7 +367,7 @@ private def slotListCmd : CliTree :=
 private def slotActiveCmd : CliTree :=
   mkLeaf "active" "Get active slot" { description := "Get the active slot" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.getActiveSlot) [Status.success.toUInt16] "slot active")
+      let d ← okData "slot active" (c.getActiveSlot)
       let some s := SlotNumber.ofFw? d[0]! | throw (CliError.other "invalid slot").toIO
       IO.println s!"Active slot: {s}"
 
@@ -342,7 +376,7 @@ private def slotChangeCmd : CliTree :=
     { description := "Set the active slot", specs := [slotSpec (required := true)] } <|
     deviceRequired fun c a => do
       let slot ← slotArg c a
-      let _ ← unwrap (expectResponse (← c.setActiveSlot slot) [Status.success.toUInt16] "slot change")
+      let _ ← okData "slot change" (c.setActiveSlot slot)
       IO.println (green s!" - Set slot {slot} activated.")
 
 private def slotTypeCmd : CliTree :=
@@ -352,8 +386,8 @@ private def slotTypeCmd : CliTree :=
     deviceRequired fun c a => do
       let slot ← slotArg c a
       let ty ← tagTypeArg a
-      let _ ← unwrap (expectResponse (← c.setSlotTagType slot ty) [Status.success.toUInt16] "slot type")
-      let _ ← unwrap (expectResponse (← c.setSlotDataDefault slot ty) [Status.success.toUInt16] "slot type")
+      let _ ← okData "slot type" (c.setSlotTagType slot ty)
+      let _ ← okData "slot type" (c.setSlotDataDefault slot ty)
       IO.println (green s!" - Set slot {slot} tag type success.")
 
 private def slotInitCmd : CliTree :=
@@ -363,7 +397,7 @@ private def slotInitCmd : CliTree :=
     deviceRequired fun c a => do
       let slot ← slotArg c a
       let ty ← tagTypeArg a
-      let _ ← unwrap (expectResponse (← c.setSlotDataDefault slot ty) [Status.success.toUInt16] "slot init")
+      let _ ← okData "slot init" (c.setSlotDataDefault slot ty)
       IO.println (green " - Set slot tag data init success.")
 
 private def slotEnableCmd : CliTree :=
@@ -375,8 +409,7 @@ private def slotEnableCmd : CliTree :=
     deviceRequired fun c a => do
       let slot ← slotArg c a
       let sense := senseArg a
-      let _ ← unwrap (expectResponse (← c.setSlotEnable slot sense !(a.has "off")) [Status.success.toUInt16]
-        "slot enable")
+      let _ ← okData "slot enable" (c.setSlotEnable slot sense !(a.has "off"))
       IO.println (green s!" - {if a.has "off" then "Disable" else "Enable"} slot {slot} {sense} success.")
 
 private def slotDeleteCmd : CliTree :=
@@ -387,14 +420,13 @@ private def slotDeleteCmd : CliTree :=
     deviceRequired fun c a => do
       let slot ← slotArg c a
       let sense := senseArg a
-      let _ ← unwrap (expectResponse (← c.deleteSlotSenseType slot sense) [Status.success.toUInt16]
-        "slot delete")
+      let _ ← okData "slot delete" (c.deleteSlotSenseType slot sense)
       IO.println (green s!" - Delete slot {slot} {sense} tag type success.")
 
 private def slotEnabledCmd : CliTree :=
   mkLeaf "enabled" "Show enabled slots" { description := "Show enabled state of all slots" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.getEnabledSlots) [Status.success.toUInt16] "slot enabled")
+      let d ← okData "slot enabled" (c.getEnabledSlots)
       for slot in SlotNumber.all do
         let fw := slot.toFw.toNat
         let onOff (b : UInt8) := if b == 0 then red "disabled" else green "enabled"
@@ -403,7 +435,7 @@ private def slotEnabledCmd : CliTree :=
 private def slotStoreCmd : CliTree :=
   mkLeaf "store" "Save slot data/config to flash" { description := "Save slot data/config to flash" } <|
     deviceRequired fun c _ => do
-      let _ ← unwrap (expectResponse (← c.slotDataConfigSave) [Status.success.toUInt16] "slot store")
+      let _ ← okData "slot store" (c.slotDataConfigSave)
       IO.println (green " - Store slots config and data to flash success.")
 
 private def slotNickGetCmd : CliTree :=
@@ -413,7 +445,7 @@ private def slotNickGetCmd : CliTree :=
     deviceRequired fun c a => do
       let slot ← slotArg c a
       let sense := senseArg a
-      let d ← unwrap (expectResponse (← c.getSlotTagNick slot sense) [Status.success.toUInt16] "slot nick get")
+      let d ← okData "slot nick get" (c.getSlotTagNick slot sense)
       IO.println (String.fromUTF8! d)
 
 private def slotNickSetCmd : CliTree :=
@@ -426,8 +458,7 @@ private def slotNickSetCmd : CliTree :=
       let slot ← slotArg c a
       let sense := senseArg a
       let name := a.str? "name" |>.getD ""
-      let _ ← unwrap (expectResponse (← c.setSlotTagNick slot sense name) [Status.success.toUInt16]
-        "slot nick set")
+      let _ ← okData "slot nick set" (c.setSlotTagNick slot sense name)
       IO.println (green s!" - Set nickname for slot {slot} {sense}: {name}")
 
 private def slotNickDeleteCmd : CliTree :=
@@ -437,14 +468,13 @@ private def slotNickDeleteCmd : CliTree :=
     deviceRequired fun c a => do
       let slot ← slotArg c a
       let sense := senseArg a
-      let _ ← unwrap (expectResponse (← c.deleteSlotTagNick slot sense) [Status.success.toUInt16]
-        "slot nick delete")
+      let _ ← okData "slot nick delete" (c.deleteSlotTagNick slot sense)
       IO.println (green s!" - Delete nickname for slot {slot} {sense}.")
 
 private def slotNickListCmd : CliTree :=
   mkLeaf "list" "List all slot nicknames" { description := "List every slot's nicknames" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.getAllSlotNicks) [Status.success.toUInt16] "slot nick list")
+      let d ← okData "slot nick list" (c.getAllSlotNicks)
       let mut o := 0
       for slot in SlotNumber.all do
         if o < d.size then
@@ -527,7 +557,7 @@ private def hf14aRawCmd : CliTree :=
 private def hf14aConfigGetCmd : CliTree :=
   mkLeaf "get" "Get HF14A config" { description := "Get the HF14A reader config" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.hf14aGetConfig) [Status.success.toUInt16] "hf14a config get")
+      let d ← okData "hf14a config get" (c.hf14aGetConfig)
       IO.println s!"bcc={d[0]!} cl2={d[1]!} cl3={d[2]!} rats={d[3]!}  \
         (each: 0=standard 1=force/fix 2=skip/ignore)"
 
@@ -542,19 +572,18 @@ private def hf14aConfigSetCmd : CliTree :=
         { key := "std", names := ["--std"], kind := .flag, help := "Reset to standard (all 0)" } ] } <|
     deviceRequired fun c a => do
       let cur ← if a.has "std" then pure (ByteArray.mk #[0, 0, 0, 0])
-                else unwrap (expectResponse (← c.hf14aGetConfig) [Status.success.toUInt16] "hf14a config get")
+                else okData "hf14a config get" (c.hf14aGetConfig)
       let pick (key : String) (i : Nat) : UInt8 := (a.int? key).map (·.toNat.toUInt8) |>.getD cur[i]!
       let bcc := pick "bcc" 0
       let cl2 := pick "cl2" 1
       let cl3 := pick "cl3" 2
       let rats := pick "rats" 3
-      let _ ← unwrap (expectResponse (← c.hf14aSetConfig bcc cl2 cl3 rats) [Status.success.toUInt16]
-        "hf14a config set")
+      let _ ← okData "hf14a config set" (c.hf14aSetConfig bcc cl2 cl3 rats)
       IO.println s!"bcc={bcc} cl2={cl2} cl3={cl3} rats={rats}"
 
 /-- Read the current anti-collision blob and split it into `(uid, atqa, sak, ats)`. -/
 private def readAntiColl (c : Client) : IO (ByteArray × ByteArray × ByteArray × ByteArray) := do
-  let d ← unwrap (expectResponse (← c.hf14aGetAntiCollData) [Status.success.toUInt16] "anticoll get")
+  let d ← okData "anticoll get" (c.hf14aGetAntiCollData)
   let uidLen := d[0]!.toNat
   let uid := d.extract 1 (1 + uidLen)
   let atqa := d.extract (1 + uidLen) (3 + uidLen)
@@ -585,13 +614,10 @@ private def anticollSetCmd : CliTree :=
       let (curUid, curAtqa, curSak, curAts) ← readAntiColl c
       let uid := a.hex? "uid" |>.getD curUid
       unless [4, 7, 10].contains uid.size do throw (CliError.usage "uid must be 4, 7 or 10 bytes").toIO
-      let atqa := a.hex? "atqa" |>.getD curAtqa
-      unless atqa.size == 2 do throw (CliError.usage "atqa must be 2 bytes").toIO
-      let sak := a.hex? "sak" |>.getD curSak
-      unless sak.size == 1 do throw (CliError.usage "sak must be 1 byte").toIO
+      let atqa ← hexArg a "atqa" 2 "atqa must be 2 bytes" curAtqa
+      let sak ← hexArg a "sak" 1 "sak must be 1 byte" curSak
       let ats := if a.has "deleteAts" then .empty else a.hex? "ats" |>.getD curAts
-      let _ ← unwrap (expectResponse (← c.hf14aSetAntiCollData uid atqa sak ats) [Status.success.toUInt16]
-        "anticoll set")
+      let _ ← okData "anticoll set" (c.hf14aSetAntiCollData uid atqa sak ats)
       IO.println (green "Anti-collision data updated.")
 
 /-! ### `hf mf` reader commands -/
@@ -614,13 +640,9 @@ Port of `MF1AuthArgsUnit.get_param`. -/
 private def mf1AuthArgs (run : Client → (block keyType : UInt8) → (key : ByteArray) → IO Unit)
     : ReplState → Args → IO Unit :=
   readerRequired fun c a => do
-    -- `required` already guaranteed presence at parse time; the fallbacks keep us total.
-    let blk := (a.int? "blk").getD 0
-    if blk < 0 ∨ 255 < blk then throw (CliError.usage "block must be in 0..255").toIO
-    let key := (a.hex? "key").getD .empty
-    unless key.size == 6 do throw (CliError.usage "key must include 12 HEX symbols").toIO
-    let keyType := if a.has "b" then MfcKeyType.b else MfcKeyType.a
-    run c blk.toNat.toUInt8 keyType.toUInt8 key
+    let blk ← byteArg a "blk" "block must be in 0..255"
+    let key ← hexArg a "key" 6 "key must include 12 HEX symbols"
+    run c blk (keyTypeArg a).toUInt8 key
 
 private def mfInfoCmd : CliTree :=
   mkLeaf "info" "Detect MIFARE Classic support" { description := "Detect MIFARE Classic support" } <|
@@ -631,11 +653,9 @@ private def mfInfoCmd : CliTree :=
 private def mfNtCmd : CliTree :=
   mkLeaf "nt" "Detect PRNG type" { description := "Detect MIFARE Classic PRNG type" } <|
     readerRequired fun c _ => do
-      match expectResponse (← c.mf1DetectPrng) [Status.hfTagOk.toUInt16] "nt" with
-      | .error e => throw e.toIO
-      | .ok d =>
-        let prng := (MifareClassicPrngType.ofUInt8? (d[0]?.getD 0)).map (·.description)
-        IO.println s!"Prng: {prng.getD "Unknown"}"
+      let d ← okHf "nt" (c.mf1DetectPrng)
+      let prng := (MifareClassicPrngType.ofUInt8? (d[0]?.getD 0)).map (·.description)
+      IO.println s!"Prng: {prng.getD "Unknown"}"
 
 private def mfAuthCmd : CliTree :=
   mkLeaf "auth" "Verify a key against a block" (mf1AuthParser "Verify a MIFARE Classic key on a block") <|
@@ -646,15 +666,14 @@ private def mfAuthCmd : CliTree :=
 private def mfRdblCmd : CliTree :=
   mkLeaf "rdbl" "Read one block" (mf1AuthParser "MIFARE Classic read one block") <|
     mf1AuthArgs fun c blk keyType key => do
-      match expectResponse (← c.mf1ReadOneBlock blk keyType key) [Status.hfTagOk.toUInt16] "rdbl" with
-      | .error e => throw e.toIO
-      | .ok d => IO.println s!" - Data: {toHex d}"
+      let d ← okHf "rdbl" (c.mf1ReadOneBlock blk keyType key)
+      IO.println s!" - Data: {toHex d}"
 
 private def mfNtdistCmd : CliTree :=
   mkLeaf "ntdist" "Detect nonce distance"
       (mf1AuthParser "Detect the nonce distance for a known key/block (nested-attack input)") <|
     mf1AuthArgs fun c blk keyType key => do
-      let d ← unwrap (expectResponse (← c.mf1DetectNtDist blk keyType key) [Status.hfTagOk.toUInt16] "ntdist")
+      let d ← okHf "ntdist" (c.mf1DetectNtDist blk keyType key)
       IO.println s!"uid={toHex (d.extract 0 4)} dist={readU32 d 4}"
 
 private def mfWrblCmd : CliTree :=
@@ -664,14 +683,10 @@ private def mfWrblCmd : CliTree :=
         [{ key := "data", names := ["-d", "--data"], kind := .hex, required := true, metavar := "hex",
            help := "16-byte block data" }] } <|
     readerRequired fun c a => do
-      let blk := (a.int? "blk").getD 0
-      if blk < 0 ∨ 255 < blk then throw (CliError.usage "block must be in 0..255").toIO
-      let key := (a.hex? "key").getD .empty
-      unless key.size == 6 do throw (CliError.usage "key must include 12 HEX symbols").toIO
-      let keyType := if a.has "b" then MfcKeyType.b else MfcKeyType.a
-      let data := (a.hex? "data").getD .empty
-      unless data.size == 16 do throw (CliError.usage "data must include 32 HEX symbols").toIO
-      let r ← c.mf1WriteOneBlock blk.toNat.toUInt8 keyType.toUInt8 key data
+      let blk ← byteArg a "blk" "block must be in 0..255"
+      let key ← hexArg a "key" 6 "key must include 12 HEX symbols"
+      let data ← hexArg a "data" 16 "data must include 32 HEX symbols"
+      let r ← c.mf1WriteOneBlock blk (keyTypeArg a).toUInt8 key data
       IO.println (if r.ok then green " - Write done." else red " - Write fail.")
 
 /-! ### `hf mf value` -/
@@ -714,8 +729,7 @@ private def mfValueParser : ArgParser := {
               { members := ["a", "b"] }, { members := ["ta", "tb"] } ] }
 
 private def mfValueGet (c : Client) (blk : UInt8) (keyType : MfcKeyType) (key : ByteArray) : IO Unit := do
-  let d ← unwrap (expectResponse (← c.mf1ReadOneBlock blk keyType.toUInt8 key) [Status.hfTagOk.toUInt16]
-    "value")
+  let d ← okHf "value" (c.mf1ReadOneBlock blk keyType.toUInt8 key)
   let val1 := i32Of (readU32LE d 0)
   let val2 := i32Of (readU32LE d 4)
   let val3 := i32Of (readU32LE d 8)
@@ -730,12 +744,9 @@ private def mfValueGet (c : Client) (blk : UInt8) (keyType : MfcKeyType) (key : 
 private def mfValueCmd : CliTree :=
   mkLeaf "value" "Increment/decrement/restore a value block" mfValueParser <|
     readerRequired fun c a => do
-      let srcBlk := (a.int? "blk").getD 0
-      if srcBlk < 0 ∨ 255 < srcBlk then throw (CliError.usage "src block must be in 0..255").toIO
-      let srcBlk := srcBlk.toNat.toUInt8
-      let srcType := if a.has "b" then MfcKeyType.b else MfcKeyType.a
-      let srcKey := (a.hex? "key").getD .empty
-      unless srcKey.size == 6 do throw (CliError.usage "src key must include 12 HEX symbols").toIO
+      let srcBlk ← byteArg a "blk" "src block must be in 0..255"
+      let srcType := keyTypeArg a
+      let srcKey ← hexArg a "key" 6 "src key must include 12 HEX symbols"
       if a.has "get" then mfValueGet c srcBlk srcType srcKey
       else if let some v := a.int? "set" then
         if v < -2147483647 ∨ 2147483647 < v then
@@ -749,8 +760,7 @@ private def mfValueCmd : CliTree :=
       else
         let dstBlk := (a.int? "tblk").map (·.toNat.toUInt8) |>.getD srcBlk
         let dstType := if a.has "ta" then MfcKeyType.a else if a.has "tb" then MfcKeyType.b else srcType
-        let dstKey := a.hex? "tkey" |>.getD srcKey
-        unless dstKey.size == 6 do throw (CliError.usage "dst key must include 12 HEX symbols").toIO
+        let dstKey ← hexArg a "tkey" 6 "dst key must include 12 HEX symbols" srcKey
         let run (op : MfcValueBlockOperator) (operand : UInt32) (verb : String) : IO Unit := do
           let r ← c.mf1ManipulateValueBlock srcBlk srcType.toUInt8 srcKey op operand dstBlk dstType.toUInt8
             dstKey
@@ -771,9 +781,7 @@ private def parseKeys (joined : String) : IO (Array ByteArray) := do
   if toks.isEmpty then throw (CliError.usage "at least one key is required").toIO
   let mut out : Array ByteArray := #[]
   for t in toks do
-    let b ← match Cli.ofHex t with
-      | .ok b => pure b
-      | .error e => throw (CliError.usage e).toIO
+    let b ← parseHex t
     unless b.size == 6 do throw (CliError.usage s!"key {t} must include 12 HEX symbols").toIO
     out := out.push b
   return out
@@ -786,8 +794,7 @@ private def mfCheckCmd : CliTree :=
           help := "10-byte bitmask of sectors to skip (default: check all)" },
         { key := "keys", help := "Keys to test (hex, space-separated)" } ] } <|
     readerRequired fun c a => do
-      let mut mask := a.hex? "mask" |>.getD (ByteArray.mk #[0,0,0,0,0,0,0,0,0,0])
-      unless mask.size == 10 do throw (CliError.usage "mask must be 10 bytes").toIO
+      let mut mask ← hexArg a "mask" 10 "mask must be 10 bytes" (ByteArray.mk #[0,0,0,0,0,0,0,0,0,0])
       let keys ← parseKeys (a.str? "keys" |>.getD "")
       let mut found : Std.HashMap Nat ByteArray := {}
       let mut i := 0
@@ -820,11 +827,9 @@ private def mfCheckBlkCmd : CliTree :=
         { key := "keys", help := "Keys to test (hex, space-separated)" } ]
       groups := [{ members := ["a", "b"] }] } <|
     readerRequired fun c a => do
-      let blk := (a.int? "blk").getD 0
-      if blk < 0 ∨ 255 < blk then throw (CliError.usage "block must be in 0..255").toIO
-      let keyType := if a.has "b" then MfcKeyType.b else MfcKeyType.a
+      let blk ← byteArg a "blk" "block must be in 0..255"
       let keys ← parseKeys (a.str? "keys" |>.getD "")
-      let r ← c.mf1CheckKeysOnBlock blk.toNat.toUInt8 keyType keys.toList
+      let r ← c.mf1CheckKeysOnBlock blk (keyTypeArg a) keys.toList
       if r.status == Status.hfTagOk.toUInt16 ∧ r.data.size == 7 ∧ r.data[0]! != 0 then
         IO.println (green s!"Found: {toHex (r.data.extract 1 7)}")
       else IO.println (yellow "Not found.")
@@ -859,13 +864,10 @@ private def mfAuthTraceCmd : CliTree :=
           help := "Tag-presence polling timeout in ms (default 5000)" } ]
       groups := [{ members := ["a", "b"] }] } <|
     readerRequired fun c a => do
-      let blk := (a.int? "blk").getD 0
-      if blk < 0 ∨ 255 < blk then throw (CliError.usage "block must be in 0..255").toIO
-      let key := (a.hex? "key").getD .empty
-      unless key.size == 6 do throw (CliError.usage "key must include 12 HEX symbols").toIO
-      let keyType := if a.has "b" then MfcKeyType.b else MfcKeyType.a
+      let blk ← byteArg a "blk" "block must be in 0..255"
+      let key ← hexArg a "key" 6 "key must include 12 HEX symbols"
       let timeout := (a.int? "timeout").map (·.toNat.toUInt16) |>.getD 5000
-      let r ← c.hf14aAuthTrace blk.toNat.toUInt8 keyType key timeout
+      let r ← c.hf14aAuthTrace blk (keyTypeArg a) key timeout
       if r.status == Status.hfTagNo.toUInt16 then
         IO.println (red "No 14443A tag in field — auth aborted"); return
       if r.data.isEmpty then
@@ -891,11 +893,9 @@ private def mfEreadCmd : CliTree :=
         { key := "blk", names := ["--blk"], kind := .int, required := true, metavar := "dec" },
         { key := "cnt", names := ["--cnt"], kind := .int, required := true, metavar := "dec" } ] } <|
     deviceRequired fun c a => do
-      let blk := (a.int? "blk").getD 0
-      let cnt := (a.int? "cnt").getD 0
-      if blk < 0 ∨ 255 < blk ∨ cnt < 0 ∨ 255 < cnt then throw (CliError.usage "out of range").toIO
-      let d ← unwrap (expectResponse (← c.mf1ReadEmuBlockData blk.toNat.toUInt8 cnt.toNat.toUInt8)
-        [Status.success.toUInt16] "eread")
+      let blk ← byteArg a "blk" "block must be in 0..255"
+      let cnt ← byteArg a "cnt" "count must be in 0..255"
+      let d ← okData "eread" (c.mf1ReadEmuBlockData blk cnt)
       printMemDump d
 
 private def mfEloadCmd : CliTree :=
@@ -905,11 +905,9 @@ private def mfEloadCmd : CliTree :=
         { key := "blk", names := ["--blk"], kind := .int, required := true, metavar := "dec" },
         { key := "data", names := ["-d", "--data"], kind := .hex, required := true, metavar := "hex" } ] } <|
     deviceRequired fun c a => do
-      let blk := (a.int? "blk").getD 0
-      if blk < 0 ∨ 255 < blk then throw (CliError.usage "block must be in 0..255").toIO
+      let blk ← byteArg a "blk" "block must be in 0..255"
       let data := a.hex? "data" |>.getD .empty
-      let _ ← unwrap (expectResponse (← c.mf1WriteEmuBlockData blk.toNat.toUInt8 data)
-        [Status.success.toUInt16] "eload")
+      let _ ← okData "eload" (c.mf1WriteEmuBlockData blk data)
       IO.println (green "Write done.")
 
 /-! ### `hf mf econfig` -/
@@ -922,7 +920,7 @@ private def enableFlagGroup (enableHelp disableHelp : String) : List ArgSpec × 
 private def mfEconfigViewCmd : CliTree :=
   mkLeaf "view" "Show emulator config" { description := "Show the MIFARE Classic emulator config" } <|
     deviceRequired fun c _ => do
-      let cfg ← unwrap (expectResponse (← c.mf1GetEmulatorConfig) [Status.success.toUInt16] "econfig view")
+      let cfg ← okData "econfig view" (c.mf1GetEmulatorConfig)
       let onOff (b : UInt8) := if b == 0 then red "disabled" else green "enabled"
       IO.println s!"Log (mfkey32) mode:    {onOff cfg[0]!}"
       IO.println s!"Gen1a magic mode:      {onOff cfg[1]!}"
@@ -930,9 +928,9 @@ private def mfEconfigViewCmd : CliTree :=
       IO.println s!"Block-0 anti-coll:     {onOff cfg[3]!}"
       IO.println s!"Write mode:            \
         {(WriteMode.ofUInt8? cfg[4]!).map toString |>.getD "invalid"}"
-      let prng ← unwrap (expectResponse (← c.mf1GetPrngType) [Status.success.toUInt16] "econfig view")
+      let prng ← okData "econfig view" (c.mf1GetPrngType)
       IO.println s!"PRNG type:             {(MifareClassicPrngType.ofUInt8? prng[0]!).map toString |>.getD "unknown"}"
-      let reset ← unwrap (expectResponse (← c.mf1GetFieldOffDoReset) [Status.success.toUInt16] "econfig view")
+      let reset ← okData "econfig view" (c.mf1GetFieldOffDoReset)
       IO.println s!"Field-off crypto reset: {onOff reset[0]!}"
 
 private def mfEconfigToggleCmd (name help enableHelp disableHelp : String)
@@ -941,7 +939,7 @@ private def mfEconfigToggleCmd (name help enableHelp disableHelp : String)
   mkLeaf name help { description := help, specs := specs, groups := [group] } <|
     deviceRequired fun c a => do
       let enable := a.has "enable"
-      let _ ← unwrap (expectResponse (← run c enable) [Status.success.toUInt16] name)
+      let _ ← okData name (run c enable)
       IO.println (green s!" - {if enable then "Enabled" else "Disabled"}.")
 
 private def mfEconfigWriteCmd : CliTree :=
@@ -952,13 +950,13 @@ private def mfEconfigWriteCmd : CliTree :=
     deviceRequired fun c a => do
       let some mode := parseEnum WriteMode.settable (·.name) (a.str? "mode" |>.getD "")
         | throw (CliError.usage "invalid write mode").toIO
-      let _ ← unwrap (expectResponse (← c.mf1SetWriteMode mode) [Status.success.toUInt16] "econfig write")
+      let _ ← okData "econfig write" (c.mf1SetWriteMode mode)
       IO.println (green s!" - Write mode set to {mode}.")
 
 private def mfEconfigPrngGetCmd : CliTree :=
   mkLeaf "get" "Get PRNG type" { description := "Get the emulated MIFARE Classic PRNG type" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.mf1GetPrngType) [Status.success.toUInt16] "prng get")
+      let d ← okData "prng get" (c.mf1GetPrngType)
       IO.println ((MifareClassicPrngType.ofUInt8? d[0]!).map toString |>.getD "unknown")
 
 private def mfEconfigPrngSetCmd : CliTree :=
@@ -969,14 +967,14 @@ private def mfEconfigPrngSetCmd : CliTree :=
     deviceRequired fun c a => do
       let some ty := parseEnum MifareClassicPrngType.all (·.name) (a.str? "type" |>.getD "")
         | throw (CliError.usage "invalid PRNG type").toIO
-      let _ ← unwrap (expectResponse (← c.mf1SetPrngType ty) [Status.success.toUInt16] "prng set")
+      let _ ← okData "prng set" (c.mf1SetPrngType ty)
       IO.println (green s!" - PRNG type set to {ty}.")
 
 private def mfEconfigFieldresetGetCmd : CliTree :=
   mkLeaf "get" "Get field-off reset"
       { description := "Whether the emulator resets crypto state when the field drops" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.mf1GetFieldOffDoReset) [Status.success.toUInt16] "fieldreset get")
+      let d ← okData "fieldreset get" (c.mf1GetFieldOffDoReset)
       IO.println (if d[0]! == 0 then "disabled" else "enabled")
 
 private def mfEconfigFieldresetSetCmd : CliTree :=
@@ -986,14 +984,13 @@ private def mfEconfigFieldresetSetCmd : CliTree :=
       specs := specs, groups := [group] } <|
     deviceRequired fun c a => do
       let enable := a.has "enable"
-      let _ ← unwrap (expectResponse (← c.mf1SetFieldOffDoReset enable) [Status.success.toUInt16]
-        "fieldreset set")
+      let _ ← okData "fieldreset set" (c.mf1SetFieldOffDoReset enable)
       IO.println (green s!" - {if enable then "Enabled" else "Disabled"}.")
 
 private def mfDetectionCountCmd : CliTree :=
   mkLeaf "count" "Get detection count" { description := "Number of logged mfkey32 records" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.mf1GetDetectionCount) [Status.success.toUInt16] "detection count")
+      let d ← okData "detection count" (c.mf1GetDetectionCount)
       IO.println s!"{readU32 d 0}"
 
 private def mfDetectionLogCmd : CliTree :=
@@ -1003,7 +1000,7 @@ private def mfDetectionLogCmd : CliTree :=
                   help := "Starting index (default 0)" }] } <|
     deviceRequired fun c a => do
       let idx := (a.int? "index").map (·.toNat.toUInt32) |>.getD 0
-      let d ← unwrap (expectResponse (← c.mf1GetDetectionLog idx) [Status.success.toUInt16] "detection log")
+      let d ← okData "detection log" (c.mf1GetDetectionLog idx)
       let mut o := 0
       let mut n := idx.toNat
       while o + 18 ≤ d.size do
@@ -1048,11 +1045,9 @@ private def mfuRdpgCmd : CliTree :=
         { key := "start", names := ["--start"], kind := .int, required := true, metavar := "dec" },
         { key := "cnt", names := ["--cnt"], kind := .int, required := true, metavar := "dec" } ] } <|
     deviceRequired fun c a => do
-      let start := (a.int? "start").getD 0
-      let cnt := (a.int? "cnt").getD 0
-      if start < 0 ∨ 255 < start ∨ cnt < 0 ∨ 255 < cnt then throw (CliError.usage "out of range").toIO
-      let d ← unwrap (expectResponse (← c.mfuReadEmuPageData start.toNat.toUInt8 cnt.toNat.toUInt8)
-        [Status.success.toUInt16] "rdpg")
+      let start ← byteArg a "start" "start must be in 0..255"
+      let cnt ← byteArg a "cnt" "count must be in 0..255"
+      let d ← okData "rdpg" (c.mfuReadEmuPageData start cnt)
       printMemDump d 4
 
 private def mfuWrpgCmd : CliTree :=
@@ -1062,17 +1057,15 @@ private def mfuWrpgCmd : CliTree :=
         { key := "start", names := ["--start"], kind := .int, required := true, metavar := "dec" },
         { key := "data", names := ["-d", "--data"], kind := .hex, required := true, metavar := "hex" } ] } <|
     deviceRequired fun c a => do
-      let start := (a.int? "start").getD 0
-      if start < 0 ∨ 255 < start then throw (CliError.usage "start out of range").toIO
+      let start ← byteArg a "start" "start must be in 0..255"
       let data := a.hex? "data" |>.getD .empty
-      let _ ← unwrap (expectResponse (← c.mfuWriteEmuPageData start.toNat.toUInt8 data)
-        [Status.success.toUInt16] "wrpg")
+      let _ ← okData "wrpg" (c.mfuWriteEmuPageData start data)
       IO.println (green "Write done.")
 
 private def mfuResetauthCmd : CliTree :=
   mkLeaf "resetauth" "Reset authentication counter" { description := "Reset authentication counter" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.mfuResetAuthCnt) [Status.success.toUInt16] "resetauth")
+      let d ← okData "resetauth" (c.mfuResetAuthCnt)
       IO.println (green s!" - Reset (was {d[0]!}).")
 
 private def mfuCounterGetCmd : CliTree :=
@@ -1081,10 +1074,8 @@ private def mfuCounterGetCmd : CliTree :=
       specs := [{ key := "counter", names := ["-c", "--counter"], kind := .int, required := true,
                   metavar := "dec" }] } <|
     deviceRequired fun c a => do
-      let idx := (a.int? "counter").getD 0
-      if idx < 0 ∨ 2 < idx then throw (CliError.usage "counter index must be 0..2").toIO
-      let d ← unwrap (expectResponse (← c.mfuReadEmuCounterData idx.toNat.toUInt8) [Status.success.toUInt16]
-        "counter get")
+      let idx ← byteArg a "counter" "counter index must be 0..2" 2
+      let d ← okData "counter get" (c.mfuReadEmuCounterData idx)
       let value := d[0]!.toUInt32 ||| (d[1]!.toUInt32 <<< 8) ||| (d[2]!.toUInt32 <<< 16)
       let hex := toHex (ByteArray.mk #[(value >>> 16).toUInt8, (value >>> 8).toUInt8, value.toUInt8])
       IO.println s!"Value: {hex} ({value})"
@@ -1099,19 +1090,17 @@ private def mfuCounterSetCmd : CliTree :=
         { key := "resetTearing", names := ["-t", "--reset-tearing"], kind := .flag,
           help := "Reset the tearing event flag" } ] } <|
     deviceRequired fun c a => do
-      let idx := (a.int? "counter").getD 0
+      let idx ← byteArg a "counter" "counter index must be 0..2" 2
       let value := (a.int? "value").getD 0
-      if idx < 0 ∨ 2 < idx then throw (CliError.usage "counter index must be 0..2").toIO
       if value < 0 ∨ 0xFFFFFF < value then throw (CliError.usage "counter value must be 0..0xFFFFFF").toIO
-      let _ ← unwrap (expectResponse
-        (← c.mfuWriteEmuCounterData idx.toNat.toUInt8 value.toNat.toUInt32 (a.has "resetTearing"))
-        [Status.success.toUInt16] "counter set")
+      let _ ← okData "counter set"
+        (c.mfuWriteEmuCounterData idx value.toNat.toUInt32 (a.has "resetTearing"))
       IO.println (green " - Ok")
 
 private def mfuVersionGetCmd : CliTree :=
   mkLeaf "get" "Get version data" { description := "Get the emulated GET_VERSION response" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.mf0NtagGetVersionData) [Status.success.toUInt16] "version get")
+      let d ← okData "version get" (c.mf0NtagGetVersionData)
       IO.println (toHex d)
 
 private def mfuVersionSetCmd : CliTree :=
@@ -1120,15 +1109,14 @@ private def mfuVersionSetCmd : CliTree :=
       specs := [{ key := "data", names := ["-d", "--data"], kind := .hex, required := true,
                   metavar := "hex" }] } <|
     deviceRequired fun c a => do
-      let data := a.hex? "data" |>.getD .empty
-      unless data.size == 8 do throw (CliError.usage "version data must be 8 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.mf0NtagSetVersionData data) [Status.success.toUInt16] "version set")
+      let data ← hexArg a "data" 8 "version data must be 8 bytes"
+      let _ ← okData "version set" (c.mf0NtagSetVersionData data)
       IO.println (green " - Ok")
 
 private def mfuSignatureGetCmd : CliTree :=
   mkLeaf "get" "Get signature" { description := "Get the emulated ECC signature" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.mf0NtagGetSignatureData) [Status.success.toUInt16] "signature get")
+      let d ← okData "signature get" (c.mf0NtagGetSignatureData)
       IO.println (toHex d)
 
 private def mfuSignatureSetCmd : CliTree :=
@@ -1137,16 +1125,14 @@ private def mfuSignatureSetCmd : CliTree :=
       specs := [{ key := "data", names := ["-d", "--data"], kind := .hex, required := true,
                   metavar := "hex" }] } <|
     deviceRequired fun c a => do
-      let data := a.hex? "data" |>.getD .empty
-      unless data.size == 32 do throw (CliError.usage "signature data must be 32 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.mf0NtagSetSignatureData data) [Status.success.toUInt16]
-        "signature set")
+      let data ← hexArg a "data" 32 "signature data must be 32 bytes"
+      let _ ← okData "signature set" (c.mf0NtagSetSignatureData data)
       IO.println (green " - Ok")
 
 private def mfuUidmagicGetCmd : CliTree :=
   mkLeaf "get" "Get UID magic mode" { description := "Get UID magic mode" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.mf0NtagGetUidMagicMode) [Status.success.toUInt16] "uidmagic get")
+      let d ← okData "uidmagic get" (c.mf0NtagGetUidMagicMode)
       IO.println (if d[0]! == 0 then "disabled" else "enabled")
 
 private def mfuUidmagicSetCmd : CliTree :=
@@ -1155,14 +1141,13 @@ private def mfuUidmagicSetCmd : CliTree :=
     { description := "Set UID magic mode", specs := specs, groups := [group] } <|
     deviceRequired fun c a => do
       let enable := a.has "enable"
-      let _ ← unwrap (expectResponse (← c.mf0NtagSetUidMagicMode enable) [Status.success.toUInt16]
-        "uidmagic set")
+      let _ ← okData "uidmagic set" (c.mf0NtagSetUidMagicMode enable)
       IO.println (green s!" - {if enable then "Enabled" else "Disabled"}.")
 
 private def mfuWriteGetCmd : CliTree :=
   mkLeaf "get" "Get write mode" { description := "Get the MFU/NTAG emulator write mode" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.mf0NtagGetWriteMode) [Status.success.toUInt16] "write get")
+      let d ← okData "write get" (c.mf0NtagGetWriteMode)
       IO.println ((WriteMode.ofUInt8? d[0]!).map toString |>.getD "invalid")
 
 private def mfuWriteSetCmd : CliTree :=
@@ -1173,14 +1158,13 @@ private def mfuWriteSetCmd : CliTree :=
     deviceRequired fun c a => do
       let some mode := parseEnum WriteMode.settable (·.name) (a.str? "mode" |>.getD "")
         | throw (CliError.usage "invalid write mode").toIO
-      let _ ← unwrap (expectResponse (← c.mf0NtagSetWriteMode mode) [Status.success.toUInt16] "write set")
+      let _ ← okData "write set" (c.mf0NtagSetWriteMode mode)
       IO.println (green s!" - Write mode set to {mode}.")
 
 private def mfuDetectionCountCmd : CliTree :=
   mkLeaf "count" "Get detection count" { description := "Number of logged NTAG password records" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.mf0NtagGetDetectionCount) [Status.success.toUInt16]
-        "detection count")
+      let d ← okData "detection count" (c.mf0NtagGetDetectionCount)
       IO.println s!"{readU32 d 0}"
 
 private def mfuDetectionLogCmd : CliTree :=
@@ -1190,8 +1174,7 @@ private def mfuDetectionLogCmd : CliTree :=
                   help := "Starting index (default 0)" }] } <|
     deviceRequired fun c a => do
       let idx := (a.int? "index").map (·.toNat.toUInt32) |>.getD 0
-      let d ← unwrap (expectResponse (← c.mf0NtagGetDetectionLog idx) [Status.success.toUInt16]
-        "detection log")
+      let d ← okData "detection log" (c.mf0NtagGetDetectionLog idx)
       let mut o := 0
       let mut n := idx.toNat
       while o + 4 ≤ d.size do
@@ -1208,13 +1191,13 @@ private def mfuPagesCmd : CliTree :=
 
 /-- The active slot's HF tag type, from `getActiveSlot` + `getSlotInfo`. -/
 private def activeHfTagType (c : Client) : IO (Option TagSpecificType) := do
-  let slot ← unwrap (expectResponse (← c.getActiveSlot) [Status.success.toUInt16] "get active slot")
-  let info ← unwrap (expectResponse (← c.getSlotInfo) [Status.success.toUInt16] "get slot info")
+  let slot ← okData "get active slot" (c.getActiveSlot)
+  let info ← okData "get slot info" (c.getSlotInfo)
   return TagSpecificType.ofUInt16? (readU16 info (slot[0]!.toNat * 4))
 
 /-- Read the four SEOS emulator fields as `(data, oid, tag, diversifier, hashAlg, encrAlg)`. -/
 private def readSeosData (c : Client) : IO (ByteArray × ByteArray × ByteArray × ByteArray × UInt8 × UInt8) := do
-  let d ← unwrap (expectResponse (← c.seosReadEmuData) [Status.success.toUInt16] "seos read")
+  let d ← okData "seos read" (c.seosReadEmuData)
   let next (o : Nat) : ByteArray × Nat := let len := d[o]!.toNat; (d.extract (o + 1) (o + 1 + len), o + 1 + len)
   let (data, o) := next 0
   let (oid, o) := next o
@@ -1258,8 +1241,7 @@ private def seosWriteCmd : CliTree :=
       if tag.size < 1 ∨ 2 < tag.size then throw (CliError.usage "tag must be 1-2 bytes").toIO
       if diversifier.size < 1 ∨ 16 < diversifier.size then
         throw (CliError.usage "diversifier must be 1-16 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.seosWriteEmuData data oid tag diversifier hashAlg encrAlg)
-        [Status.success.toUInt16] "seos write")
+      let _ ← okData "seos write" (c.seosWriteEmuData data oid tag diversifier hashAlg encrAlg)
       IO.println (green " - Ok")
 
 private def seosKeysCmd : CliTree :=
@@ -1272,14 +1254,10 @@ private def seosKeysCmd : CliTree :=
     deviceRequired fun c a => do
       unless (← activeHfTagType c) == some .seos do
         throw (CliError.other "the card in the current slot is not SEOS").toIO
-      let auth := a.hex? "auth" |>.getD .empty
-      let privenc := a.hex? "privenc" |>.getD .empty
-      let privmac := a.hex? "privmac" |>.getD .empty
-      unless auth.size == 16 do throw (CliError.usage "auth key must be 16 bytes").toIO
-      unless privenc.size == 16 do throw (CliError.usage "privenc key must be 16 bytes").toIO
-      unless privmac.size == 16 do throw (CliError.usage "privmac key must be 16 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.seosWriteEmuKeys auth privenc privmac) [Status.success.toUInt16]
-        "seos keys")
+      let auth ← hexArg a "auth" 16 "auth key must be 16 bytes"
+      let privenc ← hexArg a "privenc" 16 "privenc key must be 16 bytes"
+      let privmac ← hexArg a "privmac" 16 "privmac key must be 16 bytes"
+      let _ ← okData "seos keys" (c.seosWriteEmuKeys auth privenc privmac)
       IO.println (green " - Ok")
 
 /-! ### `hf emv` (raw ISO14443-4 T=CL wrappers; no APDU/TLV decoding) -/
@@ -1294,9 +1272,7 @@ private def emvApduCmd : CliTree :=
     { description := "Select the card and exchange one APDU"
       specs := [{ key := "apdu", help := "APDU bytes, hex", required := true }] } <|
     deviceRequired fun c a => do
-      let apdu ← match Cli.ofHex (a.str? "apdu" |>.getD "") with
-        | .ok b => pure b
-        | .error e => throw (CliError.usage e).toIO
+      let apdu ← parseHex (a.str? "apdu" |>.getD "")
       IO.println (toHex (← c.hf14a4ReaderApdu apdu).data)
 
 private def emvAnticollSetCmd : CliTree :=
@@ -1310,11 +1286,9 @@ private def emvAnticollSetCmd : CliTree :=
     deviceRequired fun c a => do
       let uid := a.hex? "uid" |>.getD .empty
       let atqa := a.hex? "atqa" |>.getD .empty
-      let sak := a.hex? "sak" |>.getD .empty
+      let sak ← hexArg a "sak" 1 "sak must be 1 byte"
       let ats := a.hex? "ats" |>.getD .empty
-      unless sak.size == 1 do throw (CliError.usage "sak must be 1 byte").toIO
-      let _ ← unwrap (expectResponse (← c.hf14a4SetAntiColl uid atqa sak[0]! ats) [Status.success.toUInt16]
-        "emv anticoll set")
+      let _ ← okData "emv anticoll set" (c.hf14a4SetAntiColl uid atqa sak[0]! ats)
       IO.println (green " - Ok")
 
 private def emvStaticAddCmd : CliTree :=
@@ -1326,15 +1300,13 @@ private def emvStaticAddCmd : CliTree :=
     deviceRequired fun c a => do
       let cmd := a.hex? "cmd" |>.getD .empty
       let resp := a.hex? "resp" |>.getD .empty
-      let _ ← unwrap (expectResponse (← c.hf14a4AddStaticResponse cmd resp) [Status.success.toUInt16]
-        "emv static add")
+      let _ ← okData "emv static add" (c.hf14a4AddStaticResponse cmd resp)
       IO.println (green " - Ok")
 
 private def emvStaticClearCmd : CliTree :=
   mkLeaf "clear" "Clear static responses" { description := "Clear all static APDU responses" } <|
     deviceRequired fun c _ => do
-      let _ ← unwrap (expectResponse (← c.hf14a4ClearStaticResponses) [Status.success.toUInt16]
-        "emv static clear")
+      let _ ← okData "emv static clear" (c.hf14a4ClearStaticResponses)
       IO.println (green " - Ok")
 
 private def emvRelayRecvCmd : CliTree :=
@@ -1349,10 +1321,8 @@ private def emvRelaySendCmd : CliTree :=
     { description := "Send an APDU response into the T=CL stack"
       specs := [{ key := "resp", help := "APDU response bytes, hex", required := true }] } <|
     deviceRequired fun c a => do
-      let resp ← match Cli.ofHex (a.str? "resp" |>.getD "") with
-        | .ok b => pure b
-        | .error e => throw (CliError.usage e).toIO
-      let _ ← unwrap (expectResponse (← c.hf14a4ApduSend resp) [Status.success.toUInt16] "emv relay send")
+      let resp ← parseHex (a.str? "resp" |>.getD "")
+      let _ ← okData "emv relay send" (c.hf14a4ApduSend resp)
       IO.println (green " - Ok")
 
 def hfGroup : CliTree :=
@@ -1425,13 +1395,11 @@ private def em410xReadCmd : CliTree :=
   mkLeaf "read" "Scan an EM410x/Electra tag and print its id"
       { description := "Scan em410x tag and print id" } <|
     readerRequired fun c _ => do
-      match expectResponse (← c.em410xScan) [Status.lfTagOk.toUInt16] "em410x read" with
-      | .error e => throw e.toIO
-      | .ok d =>
-        let tagType := readU16 d 0
-        let name := (TagSpecificType.ofUInt16? tagType).map (·.description) |>.getD s!"tag {tagType}"
-        let idLen := if tagType == TagSpecificType.em410xElectra.toUInt16 then 13 else 5
-        IO.println s!"{name}: {green (toHex (d.extract 2 (2 + idLen)))}"
+      let d ← okLf "em410x read" (c.em410xScan)
+      let tagType := readU16 d 0
+      let name := (TagSpecificType.ofUInt16? tagType).map (·.description) |>.getD s!"tag {tagType}"
+      let idLen := if tagType == TagSpecificType.em410xElectra.toUInt16 then 13 else 5
+      IO.println s!"{name}: {green (toHex (d.extract 2 (2 + idLen)))}"
 
 private def em410xWriteCmd : CliTree :=
   mkLeaf "write" "Write a card onto T55xx"
@@ -1440,13 +1408,13 @@ private def em410xWriteCmd : CliTree :=
     readerRequired fun c a => do
       let id := a.hex? "id" |>.getD .empty
       unless id.size == 5 ∨ id.size == 13 do throw (CliError.usage "id must be 5 or 13 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.em410xWriteToT55xx id) [Status.lfTagOk.toUInt16] "em410x write")
+      let _ ← okLf "em410x write" (c.em410xWriteToT55xx id)
       IO.println (green s!" - EM410x id {toHex id} write done.")
 
 private def em410xEmuGetCmd : CliTree :=
   mkLeaf "get" "Get emulated id" { description := "Get the emulated EM410x id" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.em410xGetEmuId) [Status.success.toUInt16] "em410x emu get")
+      let d ← okData "em410x emu get" (c.em410xGetEmuId)
       IO.println (toHex d)
 
 private def em410xEmuSetCmd : CliTree :=
@@ -1456,7 +1424,7 @@ private def em410xEmuSetCmd : CliTree :=
     deviceRequired fun c a => do
       let id := a.hex? "id" |>.getD .empty
       unless id.size == 5 ∨ id.size == 13 do throw (CliError.usage "id must be 5 or 13 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.em410xSetEmuId id) [Status.success.toUInt16] "em410x emu set")
+      let _ ← okData "em410x emu set" (c.em410xSetEmuId id)
       IO.println (green " - Ok")
 
 private def em4x05ReadCmd : CliTree :=
@@ -1468,21 +1436,19 @@ private def em4x05ReadCmd : CliTree :=
       let pwdBytes := a.hex? "pwd" |>.getD .empty
       unless pwdBytes.isEmpty ∨ pwdBytes.size == 4 do throw (CliError.usage "pwd must be 4 bytes").toIO
       let pwd := if pwdBytes.isEmpty then 0 else readU32 pwdBytes 0
-      match expectResponse (← c.em4x05Scan pwd) [Status.lfTagOk.toUInt16] "em4x05 read" with
-      | .error e => throw e.toIO
-      | .ok d =>
-        let config := readU32 d 0
-        let uid := readU32 d 4
-        let uidHi := readU32 d 8
-        let isEm4x69 := d[12]! != 0
-        let uidBlock := d[13]!
-        IO.println s!"Tag type : {if isEm4x69 then "EM4x69" else "EM4x05"}"
-        IO.println s!"Config   : 0x{hex32 config}"
-        IO.println s!"UID block: {uidBlock}"
-        if (config >>> 6) &&& 1 == 1 then
-          IO.println s!"Auth     : LOGIN used (pwd={if pwdBytes.isEmpty then "00000000" else toHex pwdBytes})"
-        if isEm4x69 then IO.println s!"UID (64) : {hex32 uidHi}{hex32 uid}"
-        else IO.println s!"UID      : {hex32 uid}"
+      let d ← okLf "em4x05 read" (c.em4x05Scan pwd)
+      let config := readU32 d 0
+      let uid := readU32 d 4
+      let uidHi := readU32 d 8
+      let isEm4x69 := d[12]! != 0
+      let uidBlock := d[13]!
+      IO.println s!"Tag type : {if isEm4x69 then "EM4x69" else "EM4x05"}"
+      IO.println s!"Config   : 0x{hex32 config}"
+      IO.println s!"UID block: {uidBlock}"
+      if (config >>> 6) &&& 1 == 1 then
+        IO.println s!"Auth     : LOGIN used (pwd={if pwdBytes.isEmpty then "00000000" else toHex pwdBytes})"
+      if isEm4x69 then IO.println s!"UID (64) : {hex32 uidHi}{hex32 uid}"
+      else IO.println s!"UID      : {hex32 uid}"
 
 /-! ### `lf hid` -/
 
@@ -1527,30 +1493,29 @@ private def hidReadCmd : CliTree :=
     { description := "Scan a HIDProx tag and print its fields", specs := [hidFormatSpec] } <|
     readerRequired fun c a => do
       let fmt := parseEnum HIDFormat.all (·.name) (a.str? "format" |>.getD "") |>.getD .h10301
-      match expectResponse (← c.hidproxScan fmt) [Status.lfTagOk.toUInt16] "hid read" with
-      | .error e => throw e.toIO
-      | .ok d => printHidFields d
+      let d ← okLf "hid read" (c.hidproxScan fmt)
+      printHidFields d
 
 private def hidWriteCmd : CliTree :=
   mkLeaf "write" "Write a card onto T55xx"
     { description := "Compose a HIDProx card and write it onto a T55xx tag", specs := hidCardSpecs } <|
     readerRequired fun c a => do
       let id := hidComposeFromArgs a
-      let _ ← unwrap (expectResponse (← c.hidproxWriteToT55xx id) [Status.lfTagOk.toUInt16] "hid write")
+      let _ ← okLf "hid write" (c.hidproxWriteToT55xx id)
       IO.println (green " - Write done.")
       printHidFields id
 
 private def hidEmuGetCmd : CliTree :=
   mkLeaf "get" "Get emulated id" { description := "Get the emulated HIDProx id" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.hidproxGetEmuId) [Status.success.toUInt16] "hid emu get")
+      let d ← okData "hid emu get" (c.hidproxGetEmuId)
       printHidFields d
 
 private def hidEmuSetCmd : CliTree :=
   mkLeaf "set" "Set emulated id" { description := "Set the emulated HIDProx id", specs := hidCardSpecs } <|
     deviceRequired fun c a => do
       let id := hidComposeFromArgs a
-      let _ ← unwrap (expectResponse (← c.hidproxSetEmuId id) [Status.success.toUInt16] "hid emu set")
+      let _ ← okData "hid emu set" (c.hidproxSetEmuId id)
       IO.println (green " - Ok")
 
 /-! ### `lf ioprox` -/
@@ -1569,9 +1534,8 @@ private def ioproxFields (d : ByteArray) : IO Unit := do
 private def ioproxReadCmd : CliTree :=
   mkLeaf "read" "Scan an ioProx tag" { description := "Scan an ioProx tag and print its fields" } <|
     readerRequired fun c _ => do
-      match expectResponse (← c.ioproxScan) [Status.lfTagOk.toUInt16] "ioprox read" with
-      | .error e => throw e.toIO
-      | .ok d => ioproxFields d
+      let d ← okLf "ioprox read" (c.ioproxScan)
+      ioproxFields d
 
 /-- Decode `--raw8`, or compose from `--ver`/`--fc`/`--cn`; returns the firmware's 16-byte
 card-data structure. -/
@@ -1579,13 +1543,12 @@ private def ioproxResolve (c : Client) (a : Args) : IO ByteArray := do
   match a.hex? "raw8" with
   | some raw =>
     unless raw.size == 8 do throw (CliError.usage "raw8 must be 8 bytes").toIO
-    unwrap (expectResponse (← c.ioproxDecodeRaw raw) [Status.success.toUInt16] "ioprox decode")
+    okData "ioprox decode" (c.ioproxDecodeRaw raw)
   | none =>
     let ver := (a.int? "ver").getD 1
     let fc := (a.int? "fc").getD 0
     let cn := (a.int? "cn").getD 0
-    unwrap (expectResponse (← c.ioproxComposeId ver.toNat.toUInt8 fc.toNat.toUInt8 cn.toNat.toUInt16)
-      [Status.success.toUInt16] "ioprox compose")
+    okData "ioprox compose" (c.ioproxComposeId ver.toNat.toUInt8 fc.toNat.toUInt8 cn.toNat.toUInt16)
 
 private def ioproxCardSpecs : List ArgSpec := [
   { key := "ver", names := ["--ver"], kind := .int, metavar := "int", help := "ioProx version" },
@@ -1598,15 +1561,14 @@ private def ioproxWriteCmd : CliTree :=
     { description := "Write ioProx card data onto a T55xx tag", specs := ioproxCardSpecs } <|
     readerRequired fun c a => do
       let d ← ioproxResolve c a
-      let _ ← unwrap (expectResponse (← c.ioproxWriteToT55xx (d.extract 0 16)) [Status.lfTagOk.toUInt16]
-        "ioprox write")
+      let _ ← okLf "ioprox write" (c.ioproxWriteToT55xx (d.extract 0 16))
       ioproxFields d
       IO.println (green "Write done.")
 
 private def ioproxEmuGetCmd : CliTree :=
   mkLeaf "get" "Get emulated id" { description := "Get the emulated ioProx id" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.ioproxGetEmuId) [Status.success.toUInt16] "ioprox emu get")
+      let d ← okData "ioprox emu get" (c.ioproxGetEmuId)
       ioproxFields d
 
 private def ioproxEmuSetCmd : CliTree :=
@@ -1614,8 +1576,7 @@ private def ioproxEmuSetCmd : CliTree :=
     { description := "Set the emulated ioProx id", specs := ioproxCardSpecs } <|
     deviceRequired fun c a => do
       let d ← ioproxResolve c a
-      let _ ← unwrap (expectResponse (← c.ioproxSetEmuId (d.extract 0 16)) [Status.success.toUInt16]
-        "ioprox emu set")
+      let _ ← okData "ioprox emu set" (c.ioproxSetEmuId (d.extract 0 16))
       ioproxFields d
 
 private def ioproxDecodeCmd : CliTree :=
@@ -1623,11 +1584,9 @@ private def ioproxDecodeCmd : CliTree :=
     { description := "Decode 8 raw ioProx bytes into version/facility/card number"
       specs := [{ key := "raw8", help := "8 raw bytes, hex", required := true }] } <|
     deviceRequired fun c a => do
-      let raw ← match Cli.ofHex (a.str? "raw8" |>.getD "") with
-        | .ok b => pure b
-        | .error e => throw (CliError.usage e).toIO
+      let raw ← parseHex (a.str? "raw8" |>.getD "")
       unless raw.size == 8 do throw (CliError.usage "raw8 must be 8 bytes").toIO
-      let d ← unwrap (expectResponse (← c.ioproxDecodeRaw raw) [Status.success.toUInt16] "ioprox decode")
+      let d ← okData "ioprox decode" (c.ioproxDecodeRaw raw)
       ioproxFields d
 
 private def ioproxComposeCmd : CliTree :=
@@ -1649,31 +1608,28 @@ private def vikingIdSpec : ArgSpec :=
 private def vikingReadCmd : CliTree :=
   mkLeaf "read" "Scan a Viking tag" { description := "Scan a Viking tag and print its id" } <|
     readerRequired fun c _ => do
-      match expectResponse (← c.vikingScan) [Status.lfTagOk.toUInt16] "viking read" with
-      | .error e => throw e.toIO
-      | .ok d => IO.println s!"Viking: {green (toHex d)}"
+      let d ← okLf "viking read" (c.vikingScan)
+      IO.println s!"Viking: {green (toHex d)}"
 
 private def vikingWriteCmd : CliTree :=
   mkLeaf "write" "Write a card onto T55xx"
     { description := "Write a Viking id onto a T55xx tag", specs := [vikingIdSpec] } <|
     readerRequired fun c a => do
-      let id := a.hex? "id" |>.getD .empty
-      unless id.size == 4 do throw (CliError.usage "id must be 4 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.vikingWriteToT55xx id) [Status.lfTagOk.toUInt16] "viking write")
+      let id ← hexArg a "id" 4 "id must be 4 bytes"
+      let _ ← okLf "viking write" (c.vikingWriteToT55xx id)
       IO.println (green s!" - Viking id {toHex id} write done.")
 
 private def vikingEmuGetCmd : CliTree :=
   mkLeaf "get" "Get emulated id" { description := "Get the emulated Viking id" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.vikingGetEmuId) [Status.success.toUInt16] "viking emu get")
+      let d ← okData "viking emu get" (c.vikingGetEmuId)
       IO.println (toHex d)
 
 private def vikingEmuSetCmd : CliTree :=
   mkLeaf "set" "Set emulated id" { description := "Set the emulated Viking id", specs := [vikingIdSpec] } <|
     deviceRequired fun c a => do
-      let id := a.hex? "id" |>.getD .empty
-      unless id.size == 4 do throw (CliError.usage "id must be 4 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.vikingSetEmuId id) [Status.success.toUInt16] "viking emu set")
+      let id ← hexArg a "id" 4 "id must be 4 bytes"
+      let _ ← okData "viking emu set" (c.vikingSetEmuId id)
       IO.println (green " - Ok")
 
 /-! ### `lf pac` -/
@@ -1693,22 +1649,21 @@ private def pacAscii (d : ByteArray) : String :=
 private def pacReadCmd : CliTree :=
   mkLeaf "read" "Scan a PAC/Stanley tag" { description := "Scan a PAC/Stanley tag and print its card id" } <|
     readerRequired fun c _ => do
-      match expectResponse (← c.pacScan) [Status.lfTagOk.toUInt16] "pac read" with
-      | .error e => throw e.toIO
-      | .ok d => IO.println s!"PAC/Stanley: {green (pacAscii d)} ({toHex d})"
+      let d ← okLf "pac read" (c.pacScan)
+      IO.println s!"PAC/Stanley: {green (pacAscii d)} ({toHex d})"
 
 private def pacWriteCmd : CliTree :=
   mkLeaf "write" "Write a card onto T55xx"
     { description := "Write a PAC/Stanley id onto a T55xx tag", specs := [pacCnSpec] } <|
     readerRequired fun c a => do
       let id ← pacCnBytes a
-      let _ ← unwrap (expectResponse (← c.pacWriteToT55xx id) [Status.lfTagOk.toUInt16] "pac write")
+      let _ ← okLf "pac write" (c.pacWriteToT55xx id)
       IO.println (green s!" - PAC/Stanley write done - CN: {pacAscii id}")
 
 private def pacEmuGetCmd : CliTree :=
   mkLeaf "get" "Get emulated id" { description := "Get the emulated PAC/Stanley card id" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.pacGetEmuId) [Status.success.toUInt16] "pac emu get")
+      let d ← okData "pac emu get" (c.pacGetEmuId)
       IO.println s!"CN: {pacAscii d} ({toHex d})"
 
 private def pacEmuSetCmd : CliTree :=
@@ -1716,7 +1671,7 @@ private def pacEmuSetCmd : CliTree :=
     { description := "Set the emulated PAC/Stanley card id", specs := [pacCnSpec] } <|
     deviceRequired fun c a => do
       let id ← pacCnBytes a
-      let _ ← unwrap (expectResponse (← c.pacSetEmuId id) [Status.success.toUInt16] "pac emu set")
+      let _ ← okData "pac emu set" (c.pacSetEmuId id)
       IO.println (green " - Ok")
 
 /-! ### `lf jablotron` -/
@@ -1728,34 +1683,29 @@ private def jablotronIdSpec : ArgSpec :=
 private def jablotronReadCmd : CliTree :=
   mkLeaf "read" "Scan a Jablotron tag" { description := "Scan a Jablotron tag and print its id" } <|
     readerRequired fun c _ => do
-      match expectResponse (← c.jablotronScan) [Status.lfTagOk.toUInt16] "jablotron read" with
-      | .error e => throw e.toIO
-      | .ok d => IO.println s!"Jablotron: {green (toHex d)}"
+      let d ← okLf "jablotron read" (c.jablotronScan)
+      IO.println s!"Jablotron: {green (toHex d)}"
 
 private def jablotronWriteCmd : CliTree :=
   mkLeaf "write" "Write a card onto T55xx"
     { description := "Write a Jablotron id onto a T55xx tag", specs := [jablotronIdSpec] } <|
     readerRequired fun c a => do
-      let id := a.hex? "id" |>.getD .empty
-      unless id.size == 5 do throw (CliError.usage "id must be 5 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.jablotronWriteToT55xx id) [Status.lfTagOk.toUInt16]
-        "jablotron write")
+      let id ← hexArg a "id" 5 "id must be 5 bytes"
+      let _ ← okLf "jablotron write" (c.jablotronWriteToT55xx id)
       IO.println (green s!" - Jablotron id {toHex id} write done.")
 
 private def jablotronEmuGetCmd : CliTree :=
   mkLeaf "get" "Get emulated id" { description := "Get the emulated Jablotron id" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.jablotronGetEmuId) [Status.success.toUInt16] "jablotron emu get")
+      let d ← okData "jablotron emu get" (c.jablotronGetEmuId)
       IO.println (toHex d)
 
 private def jablotronEmuSetCmd : CliTree :=
   mkLeaf "set" "Set emulated id"
     { description := "Set the emulated Jablotron id", specs := [jablotronIdSpec] } <|
     deviceRequired fun c a => do
-      let id := a.hex? "id" |>.getD .empty
-      unless id.size == 5 do throw (CliError.usage "id must be 5 bytes").toIO
-      let _ ← unwrap (expectResponse (← c.jablotronSetEmuId id) [Status.success.toUInt16]
-        "jablotron emu set")
+      let id ← hexArg a "id" 5 "id must be 5 bytes"
+      let _ ← okData "jablotron emu set" (c.jablotronSetEmuId id)
       IO.println (green " - Ok")
 
 /-! ### `lf idteck` -/
@@ -1775,9 +1725,7 @@ private def idteckIdArg (a : Args) : IO ByteArray := do
     | 16 => pure raw
     | 8 => pure (hex32 idteckPreamble ++ raw)
     | _ => throw (CliError.usage "id must be 8 or 16 HEX symbols").toIO
-  match Cli.ofHex hex with
-  | .ok b => pure b
-  | .error e => throw (CliError.usage e).toIO
+  parseHex hex
 
 private def idteckFrameInfo (frame : ByteArray) : IO Unit := do
   unless frame.size == 8 do throw (CliError.other "IDTECK frame must be 8 bytes").toIO
@@ -1804,13 +1752,13 @@ private def idteckWriteCmd : CliTree :=
     { description := "Clone an IDTECK PSK1 frame onto a T55xx tag", specs := [idteckIdSpec] } <|
     readerRequired fun c a => do
       let id ← idteckIdArg a
-      let _ ← unwrap (expectResponse (← c.idteckWriteToT55xx id) [Status.lfTagOk.toUInt16] "idteck write")
+      let _ ← okLf "idteck write" (c.idteckWriteToT55xx id)
       IO.println (green s!" - IDTECK frame {toHex id} written to T55xx.")
 
 private def idteckEmuGetCmd : CliTree :=
   mkLeaf "get" "Get emulated frame" { description := "Get the emulated IDTECK frame" } <|
     deviceRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.idteckGetEmuId) [Status.success.toUInt16] "idteck emu get")
+      let d ← okData "idteck emu get" (c.idteckGetEmuId)
       IO.println s!"Frame: {toHex d}"
       idteckFrameInfo d
 
@@ -1819,7 +1767,7 @@ private def idteckEmuSetCmd : CliTree :=
     { description := "Set the emulated IDTECK frame", specs := [idteckIdSpec] } <|
     deviceRequired fun c a => do
       let id ← idteckIdArg a
-      let _ ← unwrap (expectResponse (← c.idteckSetEmuId id) [Status.success.toUInt16] "idteck emu set")
+      let _ ← okData "idteck emu set" (c.idteckSetEmuId id)
       IO.println (green " - Ok")
 
 /-! ### `lf sniff` / `lf adc` -/
@@ -1848,7 +1796,7 @@ private def lfSniffCmd : CliTree :=
 private def lfAdcCmd : CliTree :=
   mkLeaf "adc" "Read the ADC with field on" { description := "Read the ADC and return the array" } <|
     readerRequired fun c _ => do
-      let d ← unwrap (expectResponse (← c.adcGenericRead) [Status.success.toUInt16] "adc")
+      let d ← okData "adc" (c.adcGenericRead)
       printMemDump d 25
       let avg := (d.toList.foldl (fun acc b => acc + b.toNat) 0) / d.size
       IO.println s!"avg: 0x{hexByte avg.toUInt8}"

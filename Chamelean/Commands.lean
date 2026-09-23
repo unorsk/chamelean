@@ -28,6 +28,13 @@ private def b1 (x : UInt8) : ByteArray := ByteArray.mk #[x]
 private def boolByte (b : Bool) : UInt8 := if b then 1 else 0
 private def concat (parts : List ByteArray) : ByteArray := parts.foldl (· ++ ·) .empty
 
+/-- Run `k` if `data` is exactly `n` bytes, else raise a `ValueError`-style `IO.userError`.
+Collapses the length checks every fixed-size id/frame setter needs before sending. -/
+private def withLen (data : ByteArray) (n : Nat) (k : IO Response)
+    (label : String := s!"id length must be {n}") : IO Response := do
+  if data.size != n then throw <| IO.userError label
+  k
+
 /-- Default T55xx write key, and the two legacy keys tried when reprogramming a blank tag.
 Matches `new_key` / `old_keys` in the Python client. -/
 def newKey : ByteArray := ByteArray.mk #[0x20, 0x20, 0x66, 0x66]
@@ -250,17 +257,15 @@ def hidproxScan (c : Client) (format : HIDFormat) : IO Response :=
   c.sendCmd .hidproxScan (b1 format.toUInt8)
 
 /-- Write a 13-byte HID Prox id onto a T55xx tag. -/
-def hidproxWriteToT55xx (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 13 then throw <| IO.userError "id length must be 13"
-  c.sendCmd .hidproxWriteToT55xx (t55Payload id)
+def hidproxWriteToT55xx (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 13 (c.sendCmd .hidproxWriteToT55xx (t55Payload id))
 
 /-- Read ioProx version / facility / number / raw. -/
 def ioproxScan (c : Client) : IO Response := c.sendCmd .ioproxScan
 
 /-- Write a 16-byte ioProx frame onto a T55xx tag. -/
-def ioproxWriteToT55xx (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 16 then throw <| IO.userError "id length must be 16"
-  c.sendCmd .ioproxWriteToT55xx (t55Payload id)
+def ioproxWriteToT55xx (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 16 (c.sendCmd .ioproxWriteToT55xx (t55Payload id))
 
 /-- Decode 8 raw ioProx bytes into the 16-byte card structure (firmware side). -/
 def ioproxDecodeRaw (c : Client) (raw8 : ByteArray) : IO Response :=
@@ -283,30 +288,26 @@ def em4x05Scan (c : Client) (pwd : UInt32 := 0) : IO Response :=
 def vikingScan (c : Client) : IO Response := c.sendCmd .vikingScan
 
 /-- Write a 4-byte Viking id onto a T55xx tag. -/
-def vikingWriteToT55xx (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 4 then throw <| IO.userError "id length must be 4"
-  c.sendCmd .vikingWriteToT55xx (t55Payload id)
+def vikingWriteToT55xx (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 4 (c.sendCmd .vikingWriteToT55xx (t55Payload id))
 
 /-- Read a PAC/Stanley card id. -/
 def pacScan (c : Client) : IO Response := c.sendCmd .pacScan
 
 /-- Write an 8-byte PAC/Stanley id onto a T55xx tag. -/
-def pacWriteToT55xx (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 8 then throw <| IO.userError "id length must be 8"
-  c.sendCmd .pacWriteToT55xx (t55Payload id)
+def pacWriteToT55xx (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 8 (c.sendCmd .pacWriteToT55xx (t55Payload id))
 
 /-- Read a Jablotron card id. -/
 def jablotronScan (c : Client) : IO Response := c.sendCmd .jablotronScan
 
 /-- Write a 5-byte Jablotron id onto a T55xx tag. -/
-def jablotronWriteToT55xx (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 5 then throw <| IO.userError "id length must be 5"
-  c.sendCmd .jablotronWriteToT55xx (t55Payload id)
+def jablotronWriteToT55xx (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 5 (c.sendCmd .jablotronWriteToT55xx (t55Payload id))
 
 /-- Write an 8-byte IDTECK frame onto a T55xx tag. -/
-def idteckWriteToT55xx (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 8 then throw <| IO.userError "id length must be 8"
-  c.sendCmd .idteckWriteToT55xx (t55Payload id)
+def idteckWriteToT55xx (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 8 (c.sendCmd .idteckWriteToT55xx (t55Payload id))
 
 /-- Read the raw ADC value while the field is on. -/
 def adcGenericRead (c : Client) : IO Response := c.sendCmd .adcGenericRead
@@ -375,56 +376,50 @@ def getAllSlotNicks (c : Client) : IO Response := c.sendCmd .getAllSlotNicks
 
 /-- Set the emulated EM410x id (5-byte EM410X or 13-byte Electra). -/
 def em410xSetEmuId (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 5 && id.size != 13 then throw <| IO.userError "id length must be 5 or 13"
+  unless id.size == 5 || id.size == 13 do throw <| IO.userError "id length must be 5 or 13"
   c.sendCmd .em410xSetEmuId id
 
 /-- Get the emulated EM410x id. -/
 def em410xGetEmuId (c : Client) : IO Response := c.sendCmd .em410xGetEmuId
 
 /-- Set the emulated 13-byte HID Prox id. -/
-def hidproxSetEmuId (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 13 then throw <| IO.userError "id length must be 13"
-  c.sendCmd .hidproxSetEmuId id
+def hidproxSetEmuId (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 13 (c.sendCmd .hidproxSetEmuId id)
 
 /-- Get the emulated HID Prox id. -/
 def hidproxGetEmuId (c : Client) : IO Response := c.sendCmd .hidproxGetEmuId
 
 /-- Set the emulated 16-byte ioProx id. -/
-def ioproxSetEmuId (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 16 then throw <| IO.userError "id length must be 16"
-  c.sendCmd .ioproxSetEmuId id
+def ioproxSetEmuId (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 16 (c.sendCmd .ioproxSetEmuId id)
 
 /-- Get the emulated ioProx id. -/
 def ioproxGetEmuId (c : Client) : IO Response := c.sendCmd .ioproxGetEmuId
 
 /-- Set the emulated 8-byte IDTECK frame. -/
-def idteckSetEmuId (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 8 then throw <| IO.userError "id length must be 8"
-  c.sendCmd .idteckSetEmuId id
+def idteckSetEmuId (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 8 (c.sendCmd .idteckSetEmuId id)
 
 /-- Get the emulated IDTECK frame. -/
 def idteckGetEmuId (c : Client) : IO Response := c.sendCmd .idteckGetEmuId
 
 /-- Set the emulated 4-byte Viking id. -/
-def vikingSetEmuId (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 4 then throw <| IO.userError "id length must be 4"
-  c.sendCmd .vikingSetEmuId id
+def vikingSetEmuId (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 4 (c.sendCmd .vikingSetEmuId id)
 
 /-- Get the emulated Viking id. -/
 def vikingGetEmuId (c : Client) : IO Response := c.sendCmd .vikingGetEmuId
 
 /-- Set the emulated 8-byte PAC/Stanley id. -/
-def pacSetEmuId (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 8 then throw <| IO.userError "id length must be 8"
-  c.sendCmd .pacSetEmuId id
+def pacSetEmuId (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 8 (c.sendCmd .pacSetEmuId id)
 
 /-- Get the emulated PAC/Stanley id. -/
 def pacGetEmuId (c : Client) : IO Response := c.sendCmd .pacGetEmuId
 
 /-- Set the emulated 5-byte Jablotron id. -/
-def jablotronSetEmuId (c : Client) (id : ByteArray) : IO Response := do
-  if id.size != 5 then throw <| IO.userError "id length must be 5"
-  c.sendCmd .jablotronSetEmuId id
+def jablotronSetEmuId (c : Client) (id : ByteArray) : IO Response :=
+  withLen id 5 (c.sendCmd .jablotronSetEmuId id)
 
 /-- Get the emulated Jablotron id. -/
 def jablotronGetEmuId (c : Client) : IO Response := c.sendCmd .jablotronGetEmuId
@@ -538,17 +533,15 @@ def mf0NtagSetUidMagicMode (c : Client) (enabled : Bool) : IO Response :=
 def mf0NtagGetVersionData (c : Client) : IO Response := c.sendCmd .mf0NtagGetVersionData
 
 /-- Set the emulated 8-byte GET_VERSION response. -/
-def mf0NtagSetVersionData (c : Client) (data : ByteArray) : IO Response := do
-  if data.size != 8 then throw <| IO.userError "version data must be 8 bytes"
-  c.sendCmd .mf0NtagSetVersionData data
+def mf0NtagSetVersionData (c : Client) (data : ByteArray) : IO Response :=
+  withLen data 8 (c.sendCmd .mf0NtagSetVersionData data) "version data must be 8 bytes"
 
 /-- Get the emulated 32-byte signature. -/
 def mf0NtagGetSignatureData (c : Client) : IO Response := c.sendCmd .mf0NtagGetSignatureData
 
 /-- Set the emulated 32-byte signature. -/
-def mf0NtagSetSignatureData (c : Client) (data : ByteArray) : IO Response := do
-  if data.size != 32 then throw <| IO.userError "signature data must be 32 bytes"
-  c.sendCmd .mf0NtagSetSignatureData data
+def mf0NtagSetSignatureData (c : Client) (data : ByteArray) : IO Response :=
+  withLen data 32 (c.sendCmd .mf0NtagSetSignatureData data) "signature data must be 32 bytes"
 
 /-- Get the MF0/NTAG emulator write mode. -/
 def mf0NtagGetWriteMode (c : Client) : IO Response := c.sendCmd .mf0NtagGetWriteMode
@@ -620,10 +613,8 @@ def setLongButtonPressConfig (c : Client) (button : ButtonType) (fn : ButtonPres
   c.sendCmd .setLongButtonPressConfig (ByteArray.mk #[button.toUInt8, fn.toUInt8])
 
 /-- Set the 6-character ASCII BLE pairing key. -/
-def setBleConnectKey (c : Client) (key : String) : IO Response := do
-  let bytes := key.toUTF8
-  if bytes.size != 6 then throw <| IO.userError "BLE connect key must be 6 characters"
-  c.sendCmd .setBlePairingKey bytes
+def setBleConnectKey (c : Client) (key : String) : IO Response :=
+  withLen key.toUTF8 6 (c.sendCmd .setBlePairingKey key.toUTF8) "BLE connect key must be 6 characters"
 
 /-- Delete all BLE bonds from the peer manager. -/
 def deleteAllBleBonds (c : Client) : IO Response := c.sendCmd .deleteAllBleBonds
