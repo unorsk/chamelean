@@ -123,10 +123,10 @@ def mf1HardNestedAcquire (c : Client) (slow : Bool) (block keyType : UInt8) (key
     (concat [b1 (boolByte slow), b1 keyType, b1 block, key, b1 targetType, b1 targetBlock])
     (timeoutMs := 30000)
 
-/-- Collect static-encrypted-nested nonces using a known backdoor key. -/
-def mf1StaticEncryptedNestedAcquire (c : Client) (backdoorKey : ByteArray)
+/-- Collect static-encrypted-nested nonces using a known key. -/
+def mf1StaticEncryptedNestedAcquire (c : Client) (key : ByteArray)
     (sectorCount startingSector : UInt8) : IO Response :=
-  c.sendCmd .mf1EncNestedAcquire (concat [backdoorKey, ByteArray.mk #[sectorCount, startingSector]])
+  c.sendCmd .mf1EncNestedAcquire (concat [key, ByteArray.mk #[sectorCount, startingSector]])
     (timeoutMs := 30000)
 
 /--
