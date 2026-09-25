@@ -194,7 +194,7 @@ private def settingsDumpCmd : CliTree :=
       IO.println s!"Button B (long)  : {btn 5}"
       IO.println s!"BLE pairing      : {if d[6]! != 0 then "enabled" else "disabled"}"
       IO.println s!"BLE pairing key  : {String.fromUTF8! (d.extract 7 13)}"
-      IO.println s!"Sleep timeout    : {d[13]!}s"
+      -- TODO, this one isn't exposed in the firmare IO.println s!"Sleep timeout    : {d[13]!}s"
 
 private def settingsStoreCmd : CliTree :=
   mkLeaf "store" "Save settings to flash" { description := "Save settings to flash" } <|
