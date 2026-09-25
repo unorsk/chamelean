@@ -1,9 +1,4 @@
-/-!
-These ship as separate executables in a `bin/` directory next to the client; the MIFARE
-attack commands shell out to them. The tools are optional, so `available` lets the CLI warn
-up front instead of failing mid-attack. Mirrors the `IO.Process` use in `Transport.lean`;
-only the OS process API is used.
--/
+
 namespace Chamelean
 
 /-- Directory holding the native tools (`get_resource_dir("bin")` in Python). -/

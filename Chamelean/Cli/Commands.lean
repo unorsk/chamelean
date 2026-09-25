@@ -671,7 +671,7 @@ private def mfRdblCmd : CliTree :=
 
 private def mfNtdistCmd : CliTree :=
   mkLeaf "ntdist" "Detect nonce distance"
-      (mf1AuthParser "Detect the nonce distance for a known key/block (nested-attack input)") <|
+      (mf1AuthParser "Detect the nonce distance for a known key/block") <|
     mf1AuthArgs fun c blk keyType key => do
       let d ← okHf "ntdist" (c.mf1DetectNtDist blk keyType key)
       IO.println s!"uid={toHex (d.extract 0 4)} dist={readU32 d 4}"
@@ -1339,7 +1339,7 @@ def hfGroup : CliTree :=
       mfInfoCmd,
       mfNtCmd,
       mfNtdistCmd,
-      todoLeaf "nested" "Nested attack: collect nonces",
+      todoLeaf "nested" "Collect nonces",
       todoLeaf "staticnested" "Static-nested: collect nonces",
       todoLeaf "hardnested" "Hardnested: collect nonces",
       todoLeaf "encnested" "Static-encrypted-nested: collect nonces",

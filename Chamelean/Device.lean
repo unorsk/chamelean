@@ -121,7 +121,7 @@ def WriteMode.settable : Array WriteMode := all.filter (· != shadowReq)
 @[inherit_doc WriteMode] abbrev MifareClassicWriteMode := WriteMode
 @[inherit_doc WriteMode] abbrev MifareUltralightWriteMode := WriteMode
 
-/-- How predictable a MIFARE Classic tag's nonces are, which decides the viable attack. -/
+/-- How predictable a MIFARE Classic tag's nonces are. -/
 uint_enum MifareClassicPrngType : UInt8 where
   /-- The random number of the card response is fixed. -/
   | static := 0 => "Static"
@@ -138,8 +138,8 @@ uint_enum MifareClassicDarksideStatus : UInt8 where
   | luckyAuthOk := 2 => "Try to recover a default key"
   /-- Darkside can't get the tag response enc(nak). -/
   | noNakSent := 3 => "Cannot get tag response enc(nak)"
-  /-- The tag was swapped or moved while the attack was running. -/
-  | tagChanged := 4 => "Tag changed during attack"
+  /-- The tag was swapped or moved while in progress. -/
+  | tagChanged := 4 => "Tag changed while in progress"
 
 uint_enum AnimationMode : UInt8 where
   | full := 0 => "Full animation"

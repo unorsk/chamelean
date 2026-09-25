@@ -12,8 +12,8 @@ that already parse (`hf14aScan`, the BLE-pairing pair, `getDeviceMode`) live in 
 Length and range checks that Python raised `ValueError` for are kept here, since sending a
 malformed frame just wastes a round-trip.
 
-Timeouts are milliseconds (the Python client counted in seconds); the long-running attack and
-sniff commands set an explicit one, everything else takes `sendCmd`'s default.
+Timeouts are milliseconds (the Python client counted in seconds); the long-running commands set
+an explicit one, everything else takes `sendCmd`'s default.
 -/
 namespace Chamelean
 namespace Client
@@ -82,16 +82,16 @@ def mf1DetectSupport (c : Client) : IO Bool := do
 /-- Detect the tag's PRNG class (static / weak / hard). -/
 def mf1DetectPrng (c : Client) : IO Response := c.sendCmd .mf1DetectPrng
 
-/-- Measure the nonce distance for a known key/block, for the nested attack. -/
+/-- Measure the nonce distance for a known key/block -/
 def mf1DetectNtDist (c : Client) (block keyType : UInt8) (key : ByteArray) : IO Response :=
   c.sendCmd .mf1DetectNtDist (concat [b1 keyType, b1 block, key])
 
-/-- Collect nested-attack nonces for a target block, given one known key. -/
+/-- Collect nonces for a target block, given one known key. -/
 def mf1NestedAcquire (c : Client) (block keyType : UInt8) (key : ByteArray)
     (targetBlock targetType : UInt8) : IO Response :=
   c.sendCmd .mf1NestedAcquire (concat [b1 keyType, b1 block, key, b1 targetType, b1 targetBlock])
 
-/-- Collect darkside-attack parameters. `syncMax` also scales the timeout. -/
+/-- Collect  parameters. `syncMax` also scales the timeout. -/
 def mf1DarksideAcquire (c : Client) (targetBlock targetType : UInt8) (firstRecover : Bool)
     (syncMax : UInt8) : IO Response :=
   c.sendCmd .mf1DarksideAcquire
@@ -116,7 +116,7 @@ def mf1StaticNestedAcquire (c : Client) (block keyType : UInt8) (key : ByteArray
   c.sendCmd .mf1StaticNestedAcquire
     (concat [b1 keyType, b1 block, key, b1 targetType, b1 targetBlock])
 
-/-- Collect the encrypted-nonce list for the hardnested attack. -/
+/-- Collect the encrypted-nonce list -/
 def mf1HardNestedAcquire (c : Client) (slow : Bool) (block keyType : UInt8) (key : ByteArray)
     (targetBlock targetType : UInt8) : IO Response :=
   c.sendCmd .mf1HardnestedAcquire
