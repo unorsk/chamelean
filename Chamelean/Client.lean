@@ -13,6 +13,18 @@ there is no separate transfer or timeout thread.
 -/
 namespace Chamelean
 
+/--
+Where the client sends its own diagnostics (dropped frames, an unmatched reply, the receiver
+exiting). These are emitted unbidden by the client and the background reader thread, so an
+embedding application needs to be able to capture, suppress or redirect them: a full-screen
+raw-terminal TUI, for instance, cannot let stray bytes land in the middle of its rendered
+screen. See `Client.connect` (`logSink` argument) and `Client.setLogSink`.
+-/
+abbrev LogSink := String → IO Unit
+
+/-- The default sink: write to stderr, exactly as the client did before it was configurable. -/
+def defaultLogSink : LogSink := fun msg => IO.eprintln msg
+
 structure Response where
   cmd : UInt16
   status : UInt16
@@ -42,10 +54,16 @@ structure Client where private mk ::
   reader : Task (Except IO.Error Unit)
   /-- Command codes the device reported via `getDeviceCapabilities`; empty means "not checked". -/
   supported : IO.Ref (Array UInt16)
+  /--
+  Sink for the client's own diagnostics. Held in a ref, not a plain field, so that the
+  concurrent reader thread (which captured this same ref at `connect` time) picks up a later
+  `setLogSink` too, rather than reading a stale value or a global.
+  -/
+  log : IO.Ref LogSink
 
 namespace Client
 
-private def dispatch (pending : Std.Mutex Pending) (f : Frame) : IO Unit := do
+private def dispatch (pending : Std.Mutex Pending) (log : IO.Ref LogSink) (f : Frame) : IO Unit := do
   let waiter ← pending.atomically do
     let m ← get
     let w := m[f.cmd]?
@@ -53,14 +71,14 @@ private def dispatch (pending : Std.Mutex Pending) (f : Frame) : IO Unit := do
     pure w
   match waiter with
   | some p => p.resolve { cmd := f.cmd, status := f.status, data := f.data }
-  | none => IO.eprintln s!"chamelean: no task waiting for response to cmd {Command.describe f.cmd}"
+  | none => (← log.get) s!"chamelean: no task waiting for response to cmd {Command.describe f.cmd}"
 
 private partial def readLoop (t : Transport) (pending : Std.Mutex Pending) (closing : IO.Ref Bool)
-    : IO Unit := do
+    (log : IO.Ref LogSink) : IO Unit := do
   let mut dec : Decoder := {}
   while !(← closing.get) do
     let chunk ← try t.read catch e =>
-      if !(← closing.get) then IO.eprintln s!"chamelean: {t.description}: {e}, receiver exiting"
+      if !(← closing.get) then (← log.get) s!"chamelean: {t.description}: {e}, receiver exiting"
       pure none
     match chunk with
     | none => closing.set true
@@ -70,16 +88,28 @@ private partial def readLoop (t : Transport) (pending : Std.Mutex Pending) (clos
         dec := d
         match event with
         | .none => pure ()
-        | .dropped reason => IO.eprintln s!"chamelean: dropped frame: {reason}"
-        | .frame f => dispatch pending f
+        | .dropped reason => (← log.get) s!"chamelean: dropped frame: {reason}"
+        | .frame f => dispatch pending log f
 
-/-- Connect to `target` (a serial device path or `tcp:host:port`) and start receiving. -/
-def connect (target : String) : IO Client := do
+/--
+Connect to `target` (a serial device path or `tcp:host:port`) and start receiving.
+
+`logSink` decides where the client's diagnostics go; it defaults to `defaultLogSink`
+(stderr), so existing callers and the CLI behave exactly as before. Embedders that must not
+have stray bytes reach the terminal (e.g. a raw-mode TUI) pass their own sink to capture,
+suppress or redirect them, or change it later with `setLogSink`.
+-/
+def connect (target : String) (logSink : LogSink := defaultLogSink) : IO Client := do
   let transport ← Transport.connect target
   let pending ← Std.Mutex.new {}
   let closing ← IO.mkRef false
-  let reader ← IO.asTask (prio := .dedicated) (readLoop transport pending closing)
-  return { transport, pending, closing, reader, supported := ← IO.mkRef #[] }
+  let log ← IO.mkRef logSink
+  let reader ← IO.asTask (prio := .dedicated) (readLoop transport pending closing log)
+  return { transport, pending, closing, reader, log, supported := ← IO.mkRef #[] }
+
+/-- Redirect the client's diagnostics. Takes effect for the reader thread too, since it reads
+    the same ref rather than a captured copy. -/
+def setLogSink (c : Client) (sink : LogSink) : IO Unit := c.log.set sink
 
 def isOpen (c : Client) : IO Bool := return !(← c.closing.get)
 
